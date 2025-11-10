@@ -11,8 +11,13 @@ namespace Unity.Physics
 {
     public unsafe struct VoxelCollider : ICollider
     {
+        // Header
+        private ColliderHeader m_Header;
+
+        // Mass properties (can be set externally via SetMassProperties)
+        private MassProperties m_MassProperties;
+
         public UnsafeHashMap<int3, Sector> m_Sectors;
-        public CollisionFilter m_Filter;
 
         /// <summary>
         /// Calculate the axis-aligned bounding box of this voxel collider in local space.
@@ -274,19 +279,40 @@ namespace Unity.Physics
         
         #endregion
         
-        public ColliderType Type { get => ColliderType.Voxel; }
-        public CollisionType CollisionType { get => CollisionType.Voxel; }
-        public MassProperties MassProperties { get; }
-        public int MemorySize { get; }
+        public ColliderType Type => m_Header.Type;
+        public CollisionType CollisionType => m_Header.CollisionType;
+
+        /// <summary>
+        /// Gets the mass properties. This should be set using SetMassProperties()
+        /// after computing via VoxelBody.UpdateBody() or similar methods.
+        /// </summary>
+        public MassProperties MassProperties => m_MassProperties;
+
+        /// <summary>
+        /// Sets the mass properties for this voxel collider.
+        /// Use this to apply computed mass properties from VoxelBody.UpdateBody() or other sources.
+        /// </summary>
+        /// <param name="massProperties">The computed mass properties to apply.</param>
+        public void SetMassProperties(MassProperties massProperties)
+        {
+            m_MassProperties = massProperties;
+            m_Header.Version++;
+        }
+
+        public int MemorySize => UnsafeUtility.SizeOf<VoxelCollider>();
         
         public CollisionFilter GetCollisionFilter()
         {
-            return m_Filter;
+            return m_Header.Filter;
         }
 
         public void SetCollisionFilter(CollisionFilter filter)
         {
-            m_Filter = filter;
+            if (!m_Header.Filter.Equals(filter))
+            {
+                m_Header.Version++;
+                m_Header.Filter = filter;
+            }
         }
 
         public void BakeTransform(AffineTransform transform)
@@ -294,13 +320,41 @@ namespace Unity.Physics
             SafetyChecks.LogWarning($"Not implemented for collider type {Type}.");
         }
 
-        public static BlobAssetReference<VoxelCollider> Create(
+        /// <summary>
+        /// Creates a VoxelCollider from a sector map.
+        /// Note: Mass properties are initialized with default values (mass=1, inertia tensor identity).
+        /// Call SetMassProperties() on the created collider to apply computed mass properties.
+        /// </summary>
+        public static BlobAssetReference<Collider> Create(
             IDictionary<Vector3Int, Sector> sectorMap,
             CollisionFilter filter, Material material)
         {
             unsafe
             {
                 var collider = default(VoxelCollider);
+
+                // Initialize header
+                collider.m_Header.Type = ColliderType.Voxel;
+                collider.m_Header.CollisionType = CollisionType.Voxel;
+                collider.m_Header.Version = 0;
+                collider.m_Header.Magic = 0xff;
+                collider.m_Header.ForceUniqueBlobID = ~ColliderConstants.k_SharedBlobID;
+                collider.m_Header.Filter = filter;
+
+                // Initialize with default mass properties
+                // These should be updated using SetMassProperties() after computing actual values
+                collider.m_MassProperties = new MassProperties
+                {
+                    MassDistribution = new MassDistribution
+                    {
+                        Transform = new RigidTransform(quaternion.identity, float3.zero),
+                        InertiaTensor = new float3(1.0f, 1.0f, 1.0f) // Default identity-like inertia
+                    },
+                    Volume = 1.0f,
+                    AngularExpansionFactor = 0.0f
+                };
+
+                // Initialize sectors
                 collider.m_Sectors = new UnsafeHashMap<int3, Sector>(sectorMap.Count, Allocator.Persistent);
 
                 foreach (var kvp in sectorMap)
@@ -309,8 +363,13 @@ namespace Unity.Physics
                         new int3(kvp.Key.x, kvp.Key.y, kvp.Key.z), kvp.Value);
                 }
 
-                return BlobAssetReference<VoxelCollider>.Create(&collider, sizeof(VoxelCollider));
+                return BlobAssetReference<Collider>.Create(&collider, sizeof(VoxelCollider));
             }
+        }
+
+        public void Dispose()
+        {
+            m_Sectors.Dispose();
         }
     }
 }

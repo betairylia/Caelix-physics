@@ -912,6 +912,8 @@ namespace Unity.Physics
                             return ((CompoundCollider*)collider)->CalculateAabb(transform, uniformScale);
                         case ColliderType.Terrain:
                             return ((TerrainCollider*)collider)->CalculateAabb(transform, uniformScale);
+                        case ColliderType.Voxel:
+                            return ((VoxelCollider*)collider)->CalculateAabb(transform, uniformScale);
                         default:
                             //Assert.IsTrue(Enum.IsDefined(typeof(ColliderType), collider->Type));
                             return Aabb.Empty;
