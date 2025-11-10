@@ -35,7 +35,11 @@ namespace Unity.Physics
 
         // Terrain types
         /// <summary>   An enum constant representing the terrain collider type. </summary>
-        Terrain = 9
+        Terrain = 9,
+        
+        // Voxel types
+        /// <summary>   An enum constant representing the voxel collider type. </summary>
+        Voxel = 10
     }
 
     /// <summary>   The base type of a collider. </summary>
@@ -46,7 +50,9 @@ namespace Unity.Physics
         /// <summary>   An enum constant representing the composite collision type. </summary>
         Composite = 1,
         /// <summary>   An enum constant representing the collision type. </summary>
-        Terrain = 2
+        Terrain = 2,
+        /// <summary>   An enum constant representing the voxel type. </summary>
+        Voxel = 3
     }
 
     /// <summary>   Interface for colliders. </summary>

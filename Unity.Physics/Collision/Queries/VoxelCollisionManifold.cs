@@ -88,10 +88,8 @@ namespace Unity.Physics
                         float3 dstBlockLocal = dstBlockCenter - (float3)(sectorCoordB * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS);
                         float3 dstBlockOrigin = dstBlockLocal - 0.5f + EPSILON;
 
-                        // Check if this position is within sector B bounds
-                        int3 dstBlock2x2x2Origin = new int3(dstBlockOrigin);
-
                         // Calculate which blocks to check (up to 2x2x2 grid)
+                        int3 dstBlock2x2x2Origin = new int3(dstBlockOrigin);
                         int3 exact = new int3((dstBlockOrigin - (float3)dstBlock2x2x2Origin) < (2 * EPSILON));
 
                         for (int dx = 0; dx < 2 - exact.x; dx++)

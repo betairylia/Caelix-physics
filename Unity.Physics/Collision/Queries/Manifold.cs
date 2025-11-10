@@ -31,7 +31,7 @@ namespace Unity.Physics
     }
 
     // Contact manifold stream generation functions
-    static class ManifoldQueries
+    static partial class ManifoldQueries
     {
         // A context passed through the manifold generation functions
         internal unsafe struct Context
@@ -96,6 +96,9 @@ namespace Unity.Physics
                         case CollisionType.Terrain:
                             ConvexTerrain(context, ColliderKeyPair.Empty, colliderA, colliderB, worldFromA, worldFromB, expansion.MaxDistance, false);
                             break;
+                        case CollisionType.Voxel:
+                            SafetyChecks.LogWarning("Voxel colliders can only collide with Voxel colliders. (Others not implemented)");
+                            break;
                     }
                     break;
                 case CollisionType.Composite:
@@ -109,6 +112,9 @@ namespace Unity.Physics
                             break;
                         case CollisionType.Terrain:
                             CompositeTerrain(context, colliderA, colliderB, worldFromA, worldFromB, expansion.MaxDistance, false);
+                            break;
+                        case CollisionType.Voxel:
+                            SafetyChecks.LogWarning("Voxel colliders can only collide with Voxel colliders. (Others not implemented)");
                             break;
                     }
                     break;
@@ -124,7 +130,22 @@ namespace Unity.Physics
                         case CollisionType.Terrain:
                             UnityEngine.Assertions.Assert.IsTrue(false);
                             break;
+                        case CollisionType.Voxel:
+                            SafetyChecks.LogWarning("Voxel colliders can only collide with Voxel colliders. (Others not implemented)");
+                            break;
                     }
+                    break;
+                case CollisionType.Voxel:
+                    switch (colliderB->CollisionType)
+                    {
+                        case CollisionType.Voxel:
+                            VoxelVoxel(context, colliderA, colliderB, worldFromA, worldFromB, expansion.MaxDistance, false);
+                            break;
+                        default:
+                            SafetyChecks.LogWarning("Voxel colliders can only collide with Voxel colliders. (Others not implemented)");
+                            break;
+                    }
+
                     break;
             }
         }
