@@ -142,6 +142,22 @@ namespace Unity.Physics
                                         );
                                         manifold = new ConvexConvexManifoldQueries.Manifold(convexDistance, worldFromB);
                                         WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
+
+                                        // Write voxel contact event data
+                                        // Calculate voxel coordinates (sectorPos * SECTOR_SIZE_IN_BLOCKS + in-sector-coord)
+                                        int3 voxelCoordsInA = sectorCoordA * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS + blockIter.position;
+                                        int3 voxelCoordsInB = sectorCoordB * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS + destination;
+
+                                        // Normal is A to B (manifold.Normal is already correct after flip handling in WriteManifold)
+                                        var voxelContactData = new VoxelContactEventData
+                                        {
+                                            BodyIndices = context.BodyIndices,
+                                            VoxelCoordsInA = flipped ? voxelCoordsInB : voxelCoordsInA,
+                                            VoxelCoordsInB = flipped ? voxelCoordsInA : voxelCoordsInB,
+                                            Normal = manifold.Normal
+                                        };
+
+                                        context.VoxelContactWriter->Write(voxelContactData);
                                         
 #if SHOW_DEBUG
                                         Debug.DrawLine(manifold[0].Position, manifold[0].Position + manifold.Normal * manifold[0].Distance * 100.0f, Color.red, 0.0f, true);

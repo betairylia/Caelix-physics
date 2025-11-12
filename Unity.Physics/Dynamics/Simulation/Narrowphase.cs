@@ -16,16 +16,19 @@ namespace Unity.Physics
         /// <param name="dispatchPairs">    The dispatch pairs. </param>
         /// <param name="timeStep">         The time step for the full frame. </param>
         /// <param name="contactsWriter">   [in,out] The contacts writer. </param>
+        /// <param name="voxelContactWriter">   [in,out] The voxel contact writer. </param>
         internal static void CreateContacts(ref PhysicsWorld world, NativeArray<Velocity> inputVelocities,
             NativeArray<DispatchPairSequencer.DispatchPair> dispatchPairs, float timeStep,
-            ref NativeStream.Writer contactsWriter)
+            ref NativeStream.Writer contactsWriter, ref NativeStream.Writer voxelContactWriter)
         {
             contactsWriter.BeginForEachIndex(0);
+            voxelContactWriter.BeginForEachIndex(0);
 
             ParallelCreateContactsJob.ExecuteImpl(ref world, inputVelocities, timeStep, dispatchPairs,
-                0, dispatchPairs.Length, ref contactsWriter);
+                0, dispatchPairs.Length, ref contactsWriter, ref voxelContactWriter);
 
             contactsWriter.EndForEachIndex();
+            voxelContactWriter.EndForEachIndex();
         }
 
         /// <summary>
@@ -41,13 +44,14 @@ namespace Unity.Physics
         /// <param name="dispatchPairs">        [in,out] The dispatch pairs. </param>
         /// <param name="inputDeps">            The input deps. </param>
         /// <param name="solverSchedulerInfo"> [in,out] Information describing the solver scheduler. </param>
+        /// <param name="voxelContactDataStream"> [in,out] The voxel contact event data stream. </param>
         /// <param name="multiThreaded">        (Optional) True if multi threaded. </param>
         ///
         /// <returns>   The SimulationJobHandles. </returns>
         internal static SimulationJobHandles ScheduleCreateContactsJobs(ref PhysicsWorld world, float timeStep,
             NativeArray<Velocity> inputVelocities, ref NativeStream contacts, ref NativeStream jacobians,
             ref NativeList<DispatchPairSequencer.DispatchPair> dispatchPairs, JobHandle inputDeps,
-            ref DispatchPairSequencer.SolverSchedulerInfo solverSchedulerInfo, bool multiThreaded = true)
+            ref DispatchPairSequencer.SolverSchedulerInfo solverSchedulerInfo, ref NativeStream voxelContactDataStream, bool multiThreaded = true)
         {
             SimulationJobHandles returnHandles = default;
 
@@ -61,7 +65,8 @@ namespace Unity.Physics
                     InputVelocities = inputVelocities,
                     TimeStep = timeStep,
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
-                    ContactsWriter = contacts.AsWriter()
+                    ContactsWriter = contacts.AsWriter(),
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.Schedule(inputDeps);
             }
             else
@@ -77,7 +82,8 @@ namespace Unity.Physics
                     TimeStep = timeStep,
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
                     SolverSchedulerInfo = solverSchedulerInfo,
-                    ContactsWriter = contacts.AsWriter()
+                    ContactsWriter = contacts.AsWriter(),
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.ScheduleUnsafeIndex0(numWorkItems, 1, JobHandle.CombineDependencies(contactsHandle, jacobiansHandle));
                 returnHandles.FinalExecutionHandle = processHandle;
             }
@@ -94,6 +100,7 @@ namespace Unity.Physics
             [ReadOnly] public NativeArray<Velocity> InputVelocities;
             [ReadOnly] public NativeArray<DispatchPairSequencer.DispatchPair> DispatchPairs;
             [NoAlias] public NativeStream.Writer ContactsWriter;
+            [NoAlias] public NativeStream.Writer VoxelContactWriter;
             [NoAlias, ReadOnly] public DispatchPairSequencer.SolverSchedulerInfo SolverSchedulerInfo;
 
             public unsafe void Execute(int workItemIndex)
@@ -101,16 +108,18 @@ namespace Unity.Physics
                 int dispatchPairReadOffset = SolverSchedulerInfo.GetWorkItemReadOffset(workItemIndex, out int numPairsToRead);
 
                 ContactsWriter.BeginForEachIndex(workItemIndex);
+                VoxelContactWriter.BeginForEachIndex(workItemIndex);
 
-                ExecuteImpl(ref World, InputVelocities, TimeStep, DispatchPairs, dispatchPairReadOffset, numPairsToRead, ref ContactsWriter);
+                ExecuteImpl(ref World, InputVelocities, TimeStep, DispatchPairs, dispatchPairReadOffset, numPairsToRead, ref ContactsWriter, ref VoxelContactWriter);
 
                 ContactsWriter.EndForEachIndex();
+                VoxelContactWriter.EndForEachIndex();
             }
 
             // timestep needs to be for full frame
             internal static unsafe void ExecuteImpl(ref PhysicsWorld world, NativeArray<Velocity> inputVelocities,
                 float timeStep, NativeArray<DispatchPairSequencer.DispatchPair> dispatchPairs,
-                int dispatchPairReadOffset, int numPairsToRead, ref NativeStream.Writer contactWriter)
+                int dispatchPairReadOffset, int numPairsToRead, ref NativeStream.Writer contactWriter, ref NativeStream.Writer voxelContactWriter)
             {
                 for (int i = 0; i < numPairsToRead; i++)
                 {
@@ -172,7 +181,7 @@ namespace Unity.Physics
                             }
 
                             ManifoldQueries.BodyBody(rigidBodyA, rigidBodyB, motionVelocityA, motionVelocityB,
-                                world.CollisionWorld.CollisionTolerance, timeStep, pair, ref contactWriter);
+                                world.CollisionWorld.CollisionTolerance, timeStep, pair, ref contactWriter, ref voxelContactWriter);
                         }
                     }
                 }
@@ -188,10 +197,11 @@ namespace Unity.Physics
             [ReadOnly] public NativeArray<Velocity> InputVelocities;
             [ReadOnly] public NativeArray<DispatchPairSequencer.DispatchPair> DispatchPairs;
             [NoAlias] public NativeStream.Writer ContactsWriter;
+            [NoAlias] public NativeStream.Writer VoxelContactWriter;
 
             public void Execute()
             {
-                CreateContacts(ref World, InputVelocities, DispatchPairs, TimeStep, ref ContactsWriter);
+                CreateContacts(ref World, InputVelocities, DispatchPairs, TimeStep, ref ContactsWriter, ref VoxelContactWriter);
             }
         }
     }

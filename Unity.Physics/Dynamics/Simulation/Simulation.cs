@@ -27,6 +27,7 @@ namespace Unity.Physics
         internal NativeStream CollisionEventDataStream;
         internal NativeStream TriggerEventDataStream;
         internal NativeStream ImpulseEventDataStream;
+        internal NativeStream VoxelContactDataStream;
 
         /// <summary>   Gets the collision events. </summary>
         ///
@@ -43,9 +44,14 @@ namespace Unity.Physics
         /// <value> The impulse events. </value>
         public ImpulseEvents ImpulseEvents => new ImpulseEvents(ImpulseEventDataStream);
 
+        /// <summary>   Gets the voxel contact events. </summary>
+        ///
+        /// <value> The voxel contact events. </value>
+        public VoxelContactEvents VoxelContactEvents => new VoxelContactEvents(VoxelContactDataStream);
+
         private NativeArray<int> WorkItemCount;
 
-        internal bool ReadyForEventScheduling => m_InputVelocities.IsCreated && CollisionEventDataStream.IsCreated && TriggerEventDataStream.IsCreated && ImpulseEventDataStream.IsCreated;
+        internal bool ReadyForEventScheduling => m_InputVelocities.IsCreated && CollisionEventDataStream.IsCreated && TriggerEventDataStream.IsCreated && ImpulseEventDataStream.IsCreated && VoxelContactDataStream.IsCreated;
 
         /// <summary>
         /// Resets the simulation storage
@@ -100,6 +106,10 @@ namespace Unity.Physics
             {
                 ImpulseEventDataStream.Dispose();
             }
+            if (VoxelContactDataStream.IsCreated)
+            {
+                VoxelContactDataStream.Dispose();
+            }
 
             {
                 if (!WorkItemCount.IsCreated)
@@ -110,6 +120,7 @@ namespace Unity.Physics
                 CollisionEventDataStream = new NativeStream(WorkItemCount[0], Allocator.Persistent);
                 TriggerEventDataStream = new NativeStream(WorkItemCount[0], Allocator.Persistent);
                 ImpulseEventDataStream = new NativeStream(WorkItemCount[0], Allocator.Persistent);
+                VoxelContactDataStream = new NativeStream(WorkItemCount[0], Allocator.Persistent);
             }
         }
 
@@ -171,6 +182,10 @@ namespace Unity.Physics
             {
                 handle = ImpulseEventDataStream.Dispose(handle);
             }
+            if (VoxelContactDataStream.IsCreated)
+            {
+                handle = VoxelContactDataStream.Dispose(handle);
+            }
 
             if (allocateEventDataStreams)
             {
@@ -182,6 +197,7 @@ namespace Unity.Physics
                 handle = NativeStream.ScheduleConstruct(out CollisionEventDataStream, WorkItemCount, handle, Allocator.Persistent);
                 handle = NativeStream.ScheduleConstruct(out TriggerEventDataStream, WorkItemCount, handle, Allocator.Persistent);
                 handle = NativeStream.ScheduleConstruct(out ImpulseEventDataStream, WorkItemCount, handle, Allocator.Persistent);
+                handle = NativeStream.ScheduleConstruct(out VoxelContactDataStream, WorkItemCount, handle, Allocator.Persistent);
             }
             return handle;
         }
@@ -214,6 +230,11 @@ namespace Unity.Physics
             if (ImpulseEventDataStream.IsCreated)
             {
                 ImpulseEventDataStream.Dispose();
+            }
+
+            if (VoxelContactDataStream.IsCreated)
+            {
+                VoxelContactDataStream.Dispose();
             }
 
             if (WorkItemCount.IsCreated)
@@ -288,6 +309,11 @@ namespace Unity.Physics
         ///
         /// <value> The impulse events. </value>
         public ImpulseEvents ImpulseEvents => SimulationContext.ImpulseEvents;
+
+        /// <summary>   Gets the voxel contact events. </summary>
+        ///
+        /// <value> The voxel contact events. </value>
+        public VoxelContactEvents VoxelContactEvents => SimulationContext.VoxelContactEvents;
 
         internal SimulationContext SimulationContext;
 
@@ -525,7 +551,7 @@ namespace Unity.Physics
 
                 m_StepHandles = NarrowPhase.ScheduleCreateContactsJobs(ref input.World, input.TimeStep,
                     SimulationContext.InputVelocities, ref StepContext.Contacts, ref StepContext.Jacobians,
-                    ref StepContext.PhasedDispatchPairs, handle, ref StepContext.SolverSchedulerInfo, multiThreaded);
+                    ref StepContext.PhasedDispatchPairs, handle, ref StepContext.SolverSchedulerInfo, ref SimulationContext.VoxelContactDataStream, multiThreaded);
             }
             else // Using substeps
             {
@@ -538,7 +564,7 @@ namespace Unity.Physics
                 // Create contacts using the velocity prediction data for the full frame timestep
                 m_StepHandles = NarrowPhase.ScheduleCreateContactsJobs(ref input.World, input.TimeStep, copyInputVelocities,
                     ref StepContext.Contacts, ref StepContext.Jacobians, ref StepContext.PhasedDispatchPairs, handle,
-                    ref StepContext.SolverSchedulerInfo, multiThreaded);
+                    ref StepContext.SolverSchedulerInfo, ref SimulationContext.VoxelContactDataStream, multiThreaded);
 
                 var copyHandle = copyInputVelocities.Dispose(m_StepHandles.FinalExecutionHandle);
                 m_StepHandles.FinalExecutionHandle = JobHandle.CombineDependencies(copyHandle, m_StepHandles.FinalExecutionHandle);
@@ -625,6 +651,7 @@ namespace Unity.Physics
                 SimulationContext.CollisionEventDataStream = new NativeStream(1, Allocator.Persistent);
                 SimulationContext.TriggerEventDataStream = new NativeStream(1, Allocator.Persistent);
                 SimulationContext.ImpulseEventDataStream = new NativeStream(1, Allocator.Persistent);
+                SimulationContext.VoxelContactDataStream = new NativeStream(1, Allocator.Persistent);
             }
             else
             {
@@ -635,9 +662,12 @@ namespace Unity.Physics
                     out SimulationContext.TriggerEventDataStream, workItemList, inputDeps, Allocator.Persistent);
                 JobHandle impulseEventStreamHandle = NativeStream.ScheduleConstruct(
                     out SimulationContext.ImpulseEventDataStream, workItemList, inputDeps, Allocator.Persistent);
+                JobHandle voxelContactStreamHandle = NativeStream.ScheduleConstruct(
+                    out SimulationContext.VoxelContactDataStream, workItemList, inputDeps, Allocator.Persistent);
 
                 var streamJobHandle = JobHandle.CombineDependencies(
-                    collisionEventStreamHandle, triggerEventStreamHandle, impulseEventStreamHandle);
+                    JobHandle.CombineDependencies(collisionEventStreamHandle, triggerEventStreamHandle),
+                    JobHandle.CombineDependencies(impulseEventStreamHandle, voxelContactStreamHandle));
                 jobHandle = JobHandle.CombineDependencies(jobHandle, streamJobHandle);
             }
 
