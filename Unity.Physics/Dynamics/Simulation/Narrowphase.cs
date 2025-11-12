@@ -59,6 +59,7 @@ namespace Unity.Physics
             {
                 contacts = new NativeStream(1, Allocator.TempJob);
                 jacobians = new NativeStream(1, Allocator.TempJob);
+                // Note: voxelContactDataStream is already allocated in SimulationContext
                 returnHandles.FinalExecutionHandle = new CreateContactsJob
                 {
                     World = world,
@@ -75,6 +76,13 @@ namespace Unity.Physics
                 var contactsHandle = NativeStream.ScheduleConstruct(out contacts, numWorkItems, inputDeps, Allocator.TempJob);
                 var jacobiansHandle = NativeStream.ScheduleConstruct(out jacobians, numWorkItems, inputDeps, Allocator.TempJob);
 
+                // Allocate voxelContactDataStream with same work item count for parallel writing
+                var voxelContactHandle = NativeStream.ScheduleConstruct(out voxelContactDataStream, numWorkItems, inputDeps, Allocator.Persistent);
+
+                var combinedHandle = JobHandle.CombineDependencies(
+                    JobHandle.CombineDependencies(contactsHandle, jacobiansHandle),
+                    voxelContactHandle);
+
                 var processHandle = new ParallelCreateContactsJob
                 {
                     World = world,
@@ -84,7 +92,7 @@ namespace Unity.Physics
                     SolverSchedulerInfo = solverSchedulerInfo,
                     ContactsWriter = contacts.AsWriter(),
                     VoxelContactWriter = voxelContactDataStream.AsWriter()
-                }.ScheduleUnsafeIndex0(numWorkItems, 1, JobHandle.CombineDependencies(contactsHandle, jacobiansHandle));
+                }.ScheduleUnsafeIndex0(numWorkItems, 1, combinedHandle);
                 returnHandles.FinalExecutionHandle = processHandle;
             }
 

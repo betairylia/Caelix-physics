@@ -9,9 +9,17 @@ namespace Unity.Physics
     /// An event raised when a voxel block pair collision is detected during narrowphase.
     /// Contains detailed voxel-level contact information including block coordinates.
     /// </summary>
-    public struct VoxelContactEvent : ISimulationEvent<VoxelContactEvent>
+    public struct VoxelContactEvent // : ISimulationEvent<VoxelContactEvent>
     {
         internal VoxelContactEventData EventData;
+
+        // #region ISimulationEvent
+        // public Entity EntityA { get; }
+        // public Entity EntityB { get; }
+        //
+        // public ColliderKey ColliderKeyA { get; }
+        // public ColliderKey ColliderKeyB { get; }
+        // #endregion
 
         /// <summary>   Gets the body index A. </summary>
         ///
@@ -48,7 +56,7 @@ namespace Unity.Physics
         /// Negative if this object is less than the other, 0 if they are equal, or positive if this is
         /// greater.
         /// </returns>
-        public int CompareTo(VoxelContactEvent other) => ISimulationEventUtilities.CompareEvents(this, other);
+        // public int CompareTo(VoxelContactEvent other) => ISimulationEventUtilities.CompareEvents(this, other);
     }
 
     /// <summary>

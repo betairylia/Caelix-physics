@@ -390,8 +390,9 @@ namespace Unity.Physics
                         simulationContext.InputVelocities, input.Gravity, input.TimeStep);
 
                     var contactsWriter = contacts.AsWriter();
+                    var voxelContactsWriter = simulationContext.VoxelContactDataStream.AsWriter();
                     NarrowPhase.CreateContacts(ref input.World, simulationContext.InputVelocities,
-                        dispatchPairs.AsArray(), input.TimeStep, ref contactsWriter); //Frame timestep
+                        dispatchPairs.AsArray(), input.TimeStep, ref contactsWriter, ref voxelContactsWriter); //Frame timestep
                 }
                 else // Using substeps
                 {
@@ -401,8 +402,9 @@ namespace Unity.Physics
                     Solver.UpdateInputVelocities(input.World.DynamicsWorld.MotionVelocities, copyInputVelocities, velocityFromGravity);
 
                     var contactsWriter = contacts.AsWriter();
+                    var voxelContactsWriter = simulationContext.VoxelContactDataStream.AsWriter();
                     NarrowPhase.CreateContacts(ref input.World, copyInputVelocities,
-                        dispatchPairs.AsArray(), input.TimeStep, ref contactsWriter); //Frame timestep
+                        dispatchPairs.AsArray(), input.TimeStep, ref contactsWriter, ref voxelContactsWriter); //Frame timestep
                     copyInputVelocities.Dispose();
 
                     // Integrate gravity using substep timestep
@@ -651,7 +653,7 @@ namespace Unity.Physics
                 SimulationContext.CollisionEventDataStream = new NativeStream(1, Allocator.Persistent);
                 SimulationContext.TriggerEventDataStream = new NativeStream(1, Allocator.Persistent);
                 SimulationContext.ImpulseEventDataStream = new NativeStream(1, Allocator.Persistent);
-                SimulationContext.VoxelContactDataStream = new NativeStream(1, Allocator.Persistent);
+                // Note: VoxelContactDataStream already allocated in narrowphase (single threaded uses stream from Reset)
             }
             else
             {
@@ -662,12 +664,10 @@ namespace Unity.Physics
                     out SimulationContext.TriggerEventDataStream, workItemList, inputDeps, Allocator.Persistent);
                 JobHandle impulseEventStreamHandle = NativeStream.ScheduleConstruct(
                     out SimulationContext.ImpulseEventDataStream, workItemList, inputDeps, Allocator.Persistent);
-                JobHandle voxelContactStreamHandle = NativeStream.ScheduleConstruct(
-                    out SimulationContext.VoxelContactDataStream, workItemList, inputDeps, Allocator.Persistent);
+                // Note: VoxelContactDataStream already allocated in narrowphase with proper work item count
 
                 var streamJobHandle = JobHandle.CombineDependencies(
-                    JobHandle.CombineDependencies(collisionEventStreamHandle, triggerEventStreamHandle),
-                    JobHandle.CombineDependencies(impulseEventStreamHandle, voxelContactStreamHandle));
+                    collisionEventStreamHandle, triggerEventStreamHandle, impulseEventStreamHandle);
                 jobHandle = JobHandle.CombineDependencies(jobHandle, streamJobHandle);
             }
 
