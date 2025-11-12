@@ -139,9 +139,9 @@ namespace Unity.Physics
     /// </summary>
     public struct ConstraintBlock3
     {
-        internal Constraint A;
-        internal Constraint B;
-        internal Constraint C;
+        public Constraint A;
+        public Constraint B;
+        public Constraint C;
 
         /// <summary>   The number of constraints currently stored. </summary>
         public byte Length;

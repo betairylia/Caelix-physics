@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities;
@@ -14,10 +15,13 @@ namespace Unity.Physics
         // Header
         private ColliderHeader m_Header;
 
+        /// <summary>   The material. </summary>
+        public Material Material;
+
         // Mass properties (can be set externally via SetMassProperties)
         private MassProperties m_MassProperties;
 
-        public UnsafeHashMap<int3, Sector> m_Sectors;
+        public UnsafeHashMap<int3, SectorHandle> m_Sectors;
 
         /// <summary>
         /// Calculate the axis-aligned bounding box of this voxel collider in local space.
@@ -321,12 +325,33 @@ namespace Unity.Physics
         }
 
         /// <summary>
+        /// Indicates whether collider should collide normally with others,
+        /// or skip collision, but still move and intercept queries.
+        /// </summary>
+        internal bool RespondsToCollision => Material.CollisionResponse != CollisionResponsePolicy.None;
+
+        /// <summary>
+        /// Sets a material field for this voxel collider.
+        /// </summary>
+        internal void SetMaterialField(Material material, Material.MaterialField option)
+        {
+            if (option == Material.MaterialField.Friction || option == Material.MaterialField.FrictionCombinePolicy)
+                Material.Friction = material.Friction;
+            if (option == Material.MaterialField.Restitution || option == Material.MaterialField.RestitutionCombinePolicy)
+                Material.Restitution = material.Restitution;
+            if (option == Material.MaterialField.CollisionResponsePolicy)
+                Material.CollisionResponse = material.CollisionResponse;
+            // Increment version when material changes
+            m_Header.Version++;
+        }
+
+        /// <summary>
         /// Creates a VoxelCollider from a sector map.
         /// Note: Mass properties are initialized with default values (mass=1, inertia tensor identity).
         /// Call SetMassProperties() on the created collider to apply computed mass properties.
         /// </summary>
         public static BlobAssetReference<Collider> Create(
-            IDictionary<Vector3Int, Sector> sectorMap,
+            IDictionary<Vector3Int, SectorHandle> sectorMap,
             CollisionFilter filter, Material material)
         {
             unsafe
@@ -340,6 +365,9 @@ namespace Unity.Physics
                 collider.m_Header.Magic = 0xff;
                 collider.m_Header.ForceUniqueBlobID = ~ColliderConstants.k_SharedBlobID;
                 collider.m_Header.Filter = filter;
+
+                // Initialize material
+                collider.Material = material;
 
                 // Initialize with default mass properties
                 // These should be updated using SetMassProperties() after computing actual values
@@ -355,15 +383,21 @@ namespace Unity.Physics
                 };
 
                 // Initialize sectors
-                collider.m_Sectors = new UnsafeHashMap<int3, Sector>(sectorMap.Count, Allocator.Persistent);
-
-                foreach (var kvp in sectorMap)
-                {
-                    collider.m_Sectors.Add(
-                        new int3(kvp.Key.x, kvp.Key.y, kvp.Key.z), kvp.Value);
-                }
+                collider.m_Sectors = new UnsafeHashMap<int3, SectorHandle>(sectorMap?.Count ?? 1, Allocator.Persistent);
+                collider.ReloadSectors(sectorMap);
 
                 return BlobAssetReference<Collider>.Create(&collider, sizeof(VoxelCollider));
+            }
+        }
+
+        public void ReloadSectors(IDictionary<Vector3Int, SectorHandle> sectorMap)
+        {
+            if (sectorMap == null) return;
+            m_Sectors.Clear();
+            foreach (var kvp in sectorMap)
+            {
+                m_Sectors.Add(
+                    new int3(kvp.Key.x, kvp.Key.y, kvp.Key.z), kvp.Value);
             }
         }
 

@@ -1,5 +1,9 @@
-﻿using Unity.Physics;
+﻿// #define SHOW_DEBUG
+
+using Unity.Physics;
 using Unity.Mathematics;
+using UnityEngine;
+using Voxelis;
 using static Unity.Physics.Math;
 
 namespace Unity.Physics
@@ -75,7 +79,7 @@ namespace Unity.Physics
                     var manifold = new ConvexConvexManifoldQueries.Manifold();
 
                     // Iterate through all non-empty blocks in sector A
-                    foreach (Voxelis.BlockIterator blockIter in new Voxelis.SectorEnumerator(sectorA))
+                    foreach (Voxelis.BlockIterator blockIter in new Voxelis.SectorEnumerator(*sectorA.Ptr))
                     {
                         // Calculate the world position of the block in A
                         float3 srcBlockWorldPos = new float3(blockIter.position + sectorCoordA * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS);
@@ -128,55 +132,70 @@ namespace Unity.Physics
 
                                     // Basic sphere-ish collision (same as SectorJob)
                                     float dsq = math.lengthsq(dstBlockLocal - dstTargetCenter);
-                                    if (dsq <= 1.0f)
+                                    if (dsq <= 0.9216f)
                                     {
+                                        // Prototype: Use SphereSphere directly
+                                        DistanceQueries.Result convexDistance = DistanceQueries.PointPoint(
+                                            dstBlockLocal + sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS,
+                                            dstTargetCenter + sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS,
+                                            0.48f, 0.96f
+                                        );
+                                        manifold = new ConvexConvexManifoldQueries.Manifold(convexDistance, worldFromB);
+                                        WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
+                                        
+#if SHOW_DEBUG
+                                        Debug.DrawLine(manifold[0].Position, manifold[0].Position + manifold.Normal * manifold[0].Distance * 100.0f, Color.red, 0.0f, true);
+                                        Debug.Log($"Contact Manifold: {manifold[0].Position} -> {manifold[0].Position + manifold.Normal * manifold[0].Distance}");
+#endif
+                                        
                                         // Calculate contact in B space then transform to world space
-                                        float3 contactPosB = (dstBlockLocal + dstTargetCenter) / 2.0f + (float3)(sectorCoordB * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS);
-                                        float3 normalB = math.normalize(dstTargetCenter - dstBlockLocal);
-
-                                        // Transform contact position to world space
-                                        float3 contactPosWorld = Math.Mul(worldFromB, contactPosB);
-                                        float3 normalWorld = math.mul(worldFromB.Rotation, normalB);
-
-                                        float distance = math.sqrt(1.0f - dsq) - 1.0f;
-
-                                        // Add to manifold or flush if different normal
-                                        if (manifold.NumContacts > 0 && math.dot(manifold.Normal, normalWorld) < 0.99f)
-                                        {
-                                            // Flush manifold with current normal
-                                            WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
-                                            manifold = new ConvexConvexManifoldQueries.Manifold
-                                            {
-                                                Normal = normalWorld
-                                            };
-                                        }
-                                        else if (manifold.NumContacts == 0)
-                                        {
-                                            manifold.Normal = normalWorld;
-                                        }
-
-                                        if (manifold.NumContacts < ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts)
-                                        {
-                                            manifold[manifold.NumContacts++] = new ContactPoint
-                                            {
-                                                Position = contactPosWorld,
-                                                Distance = distance
-                                            };
-                                        }
-                                        else
-                                        {
-                                            // Flush and start new manifold
-                                            WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
-                                            manifold = new ConvexConvexManifoldQueries.Manifold
-                                            {
-                                                Normal = normalWorld
-                                            };
-                                            manifold[manifold.NumContacts++] = new ContactPoint
-                                            {
-                                                Position = contactPosWorld,
-                                                Distance = distance
-                                            };
-                                        }
+                                        // float3 contactPosB = (dstBlockLocal + dstTargetCenter) / 2.0f + (float3)(sectorCoordB * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS);
+                                        // float3 normalB = math.normalize(dstTargetCenter - dstBlockLocal);
+                                        //
+                                        // // Transform contact position to world space
+                                        // float3 contactPosWorld = Math.Mul(worldFromB, contactPosB);
+                                        // float3 normalWorld = math.mul(worldFromB.Rotation, normalB);
+                                        //
+                                        // float distance = math.sqrt(dsq) - 1.0f;
+                                        //
+                                        // // Add to manifold or flush if different normal
+                                        // // if (manifold.NumContacts > 0 && math.dot(manifold.Normal, normalWorld) < 0.99f)
+                                        // if (manifold.NumContacts > 0)
+                                        // {
+                                        //     // Flush manifold with current normal
+                                        //     WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
+                                        //     manifold = new ConvexConvexManifoldQueries.Manifold
+                                        //     {
+                                        //         Normal = normalWorld
+                                        //     };
+                                        // }
+                                        // else if (manifold.NumContacts == 0)
+                                        // {
+                                        //     manifold.Normal = normalWorld;
+                                        // }
+                                        //
+                                        // if (manifold.NumContacts < ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts)
+                                        // {
+                                        //     manifold[manifold.NumContacts++] = new ContactPoint
+                                        //     {
+                                        //         Position = contactPosWorld,
+                                        //         Distance = distance
+                                        //     };
+                                        // }
+                                        // else
+                                        // {
+                                        //     // Flush and start new manifold
+                                        //     WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
+                                        //     manifold = new ConvexConvexManifoldQueries.Manifold
+                                        //     {
+                                        //         Normal = normalWorld
+                                        //     };
+                                        //     manifold[manifold.NumContacts++] = new ContactPoint
+                                        //     {
+                                        //         Position = contactPosWorld,
+                                        //         Distance = distance
+                                        //     };
+                                        // }
                                     }
                                 }
                             }

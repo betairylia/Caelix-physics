@@ -206,6 +206,8 @@ namespace Unity.Physics
                                 return ((CompoundCollider*)collider)->MemorySize;
                             case ColliderType.Terrain:
                                 return ((TerrainCollider*)collider)->MemorySize;
+                            case ColliderType.Voxel:
+                                return ((VoxelCollider*)collider)->MemorySize;
                             default:
                                 //Assert.IsTrue(Enum.IsDefined(typeof(ColliderType), collider->Type));
                                 return 0;
@@ -258,6 +260,8 @@ namespace Unity.Physics
                             return ((MeshCollider*)collider)->GetCollisionFilter();
                         case ColliderType.Compound:
                             return ((CompoundCollider*)collider)->GetCollisionFilter(colliderKey);
+                        case ColliderType.Voxel:
+                            return ((VoxelCollider*)collider)->GetCollisionFilter();
                         default:
                             return CollisionFilter.Default;
                     }
@@ -316,6 +320,9 @@ namespace Unity.Physics
                         case ColliderType.Compound:
                             ((CompoundCollider*)collider)->BakeTransform(transform);
                             break;
+                        case ColliderType.Voxel:
+                            ((VoxelCollider*)collider)->BakeTransform(transform);
+                            break;
                         default:
                             SafetyChecks.ThrowInvalidOperationException($"Not implemented for collider type {collider->Type}.");
                             break;
@@ -366,6 +373,9 @@ namespace Unity.Physics
                             break;
                         case ColliderType.Compound:
                             ((CompoundCollider*)collider)->SetCollisionFilter(filter, colliderKey);
+                            break;
+                        case ColliderType.Voxel:
+                            ((VoxelCollider*)collider)->SetCollisionFilter(filter);
                             break;
                         default:
                             break;
@@ -553,6 +563,11 @@ namespace Unity.Physics
                             }
                             break;
                         }
+                        case CollisionType.Voxel:
+                        {
+                            VoxelCollider* voxelPtr = (VoxelCollider*)ptr;
+                            return voxelPtr->Material;
+                        }
                         default:
                             SafetyChecks.ThrowInvalidOperationException("Invalid CollisionType");
                             break;
@@ -605,6 +620,12 @@ namespace Unity.Physics
                                     break;
                             }
                             break;
+                        case CollisionType.Voxel:
+                        {
+                            VoxelCollider* voxelPtr = (VoxelCollider*)ptr;
+                            voxelPtr->SetMaterialField(material, option);
+                            break;
+                        }
                         default:
                             SafetyChecks.ThrowInvalidOperationException("Invalid CollisionType");
                             break;
@@ -644,6 +665,8 @@ namespace Unity.Physics
                                 return ((CompoundCollider*)collider)->RespondsToCollision;
                             case ColliderType.Terrain:
                                 return ((TerrainCollider*)collider)->RespondsToCollision;
+                            case ColliderType.Voxel:
+                                return ((VoxelCollider*)collider)->RespondsToCollision;
                             default:
                                 //Assert.IsTrue(Enum.IsDefined(typeof(ColliderType), collider->Type));
                                 return false;
@@ -685,6 +708,8 @@ namespace Unity.Physics
                                 return ((CompoundCollider*)collider)->MassProperties;
                             case ColliderType.Terrain:
                                 return ((TerrainCollider*)collider)->MassProperties;
+                            case ColliderType.Voxel:
+                                return ((VoxelCollider*)collider)->MassProperties;
                             default:
                                 //Assert.IsTrue(Enum.IsDefined(typeof(ColliderType), collider->Type));
                                 return MassProperties.UnitSphere;
@@ -717,6 +742,8 @@ namespace Unity.Physics
                                 return ((CompoundCollider*)collider)->NumColliderKeyBits;
                             case ColliderType.Terrain:
                                 return ((TerrainCollider*)collider)->NumColliderKeyBits;
+                            case ColliderType.Voxel:
+                                return 0;
                             default:
                                 if (collider->CollisionType != CollisionType.Convex)
                                 {
@@ -748,6 +775,8 @@ namespace Unity.Physics
                                 return ((CompoundCollider*)collider)->TotalNumColliderKeyBits;
                             case ColliderType.Terrain:
                                 return ((TerrainCollider*)collider)->TotalNumColliderKeyBits;
+                            case ColliderType.Voxel:
+                                return 0;
                             default:
                                 if (collider->CollisionType != CollisionType.Convex)
                                 {
@@ -781,6 +810,9 @@ namespace Unity.Physics
                             return ((CompoundCollider*)collider)->GetChild(ref key, out child);
                         case ColliderType.Terrain:
                             return ((TerrainCollider*)collider)->GetChild(ref key, out child);
+                        case ColliderType.Voxel:
+                            child = new ChildCollider();
+                            return false;
                         default:
                             //Assert.IsTrue(Enum.IsDefined(typeof(ColliderType), collider->Type));
                             child = new ChildCollider();
@@ -827,6 +859,9 @@ namespace Unity.Physics
                             break;
                         case ColliderType.Terrain:
                             ((TerrainCollider*)collider)->GetLeaves(ref collector);
+                            break;
+                        case ColliderType.Voxel:
+                            // No leaves to collect for voxel colliders
                             break;
                     }
                 }
