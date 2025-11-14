@@ -46,6 +46,11 @@ namespace Unity.Physics
         /// <value> The normal vector. </value>
         public float3 Normal => EventData.Normal;
 
+        /// <summary>   Gets the contact metadata (flags). </summary>
+        ///
+        /// <value> True if the contact affects the physics simulation. </value>
+        public bool IsPhysicsContact => EventData.isPhysicsContact;
+
         /// <summary>
         /// Compares this VoxelContactEvent object to another to determine their relative ordering.
         /// </summary>
@@ -144,5 +149,6 @@ namespace Unity.Physics
         public int3 VoxelCoordsInA;
         public int3 VoxelCoordsInB;
         public float3 Normal;
+        public bool isPhysicsContact; // May change to a bitmask flag later (byte).
     }
 }
