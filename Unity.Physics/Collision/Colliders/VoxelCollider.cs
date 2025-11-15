@@ -351,7 +351,7 @@ namespace Unity.Physics
         /// Call SetMassProperties() on the created collider to apply computed mass properties.
         /// </summary>
         public static BlobAssetReference<Collider> Create(
-            IDictionary<Vector3Int, SectorHandle> sectorMap,
+            IDictionary<int3, SectorHandle> sectorMap,
             CollisionFilter filter, Material material)
         {
             unsafe
@@ -390,15 +390,27 @@ namespace Unity.Physics
             }
         }
 
-        public void ReloadSectors(IDictionary<Vector3Int, SectorHandle> sectorMap)
+        public void ReloadSectors(IDictionary<int3, SectorHandle> sectorMap)
         {
             if (sectorMap == null) return;
             m_Sectors.Clear();
             foreach (var kvp in sectorMap)
             {
-                m_Sectors.Add(
-                    new int3(kvp.Key.x, kvp.Key.y, kvp.Key.z), kvp.Value);
+                m_Sectors.Add(kvp.Key, kvp.Value);
             }
+            m_Header.Version++;
+        }
+        
+        // TODO: Modify this so we don't copy?
+        public void ReloadSectors(NativeHashMap<int3, SectorHandle> sectorMap)
+        {
+            if (!sectorMap.IsCreated) return;
+            m_Sectors.Clear();
+            foreach (var kvp in sectorMap)
+            {
+                m_Sectors.Add(kvp.Key, kvp.Value);
+            }
+            m_Header.Version++;
         }
 
         public void Dispose()
