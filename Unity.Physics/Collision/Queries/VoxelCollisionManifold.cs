@@ -79,7 +79,7 @@ namespace Unity.Physics
                     var manifold = new ConvexConvexManifoldQueries.Manifold();
 
                     // Iterate through all non-empty blocks in sector A
-                    foreach (Voxelis.BlockIterator blockIter in new Voxelis.SectorEnumerator(*sectorA.Ptr))
+                    foreach (Voxelis.BlockIterator blockIter in new Voxelis.SectorNonEmptyBlockEnumerator(*sectorA.Ptr))
                     {
                         // Calculate the world position of the block in A
                         float3 srcBlockWorldPos = new float3(blockIter.position + sectorCoordA * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS);
