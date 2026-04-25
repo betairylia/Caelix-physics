@@ -6,7 +6,8 @@
         "Unity.Collections",
         "Unity.Numerics.Linear",
         "Unity.Numerics.Linear.Dense",
-        "Unity.Numerics.Random"
+        "Unity.Numerics.Random",
+        "Unity.Numerics.Memory"
         ],
     "allowUnsafeCode": true,
     "includePlatforms": [],
