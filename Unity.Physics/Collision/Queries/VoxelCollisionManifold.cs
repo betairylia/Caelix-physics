@@ -128,13 +128,16 @@ namespace Unity.Physics
                                         continue;
                                     }
 
+                                    var dstBlockInfo = sectorB.GetSlot<PhysicsInfo>(
+                                        SectorSlotId.PhysicsInfo, destination.x, destination.y, destination.z);
+
                                     float3 dstTargetCenter = (float3)destination + 0.5f;
 
                                     // Write voxel contact event data
                                     // Calculate voxel coordinates (sectorPos * SECTOR_SIZE_IN_BLOCKS + in-sector-coord)
                                     int3 voxelCoordsInA = sectorCoordA * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS + blockIter.position;
                                     int3 voxelCoordsInB = sectorCoordB * Voxelis.Sector.SECTOR_SIZE_IN_BLOCKS + destination;
-                                    
+
                                     // Normal is A to B (manifold.Normal is already correct after flip handling in WriteManifold)
                                     var voxelContactData = new VoxelContactEventData
                                     {
@@ -144,16 +147,27 @@ namespace Unity.Physics
                                         Normal = float3.zero,
                                         isPhysicsContact = false
                                     };
-                                        
+
+                                    float3 AtoB = dstTargetCenter - dstBlockLocal;
+
+                                    int xBit = (AtoB.x > 0) ? NeighborhoodSettings.Xpos : NeighborhoodSettings.Xneg;
+                                    AtoB.x = (dstBlockInfo.data & (1 << xBit)) > 0 ? AtoB.x : 0;
+
+                                    int yBit = (AtoB.y > 0) ? NeighborhoodSettings.Ypos : NeighborhoodSettings.Yneg;
+                                    AtoB.y = (dstBlockInfo.data & (1 << yBit)) > 0 ? AtoB.y : 0;
+
+                                    int zBit = (AtoB.z > 0) ? NeighborhoodSettings.Zpos : NeighborhoodSettings.Zneg;
+                                    AtoB.z = (dstBlockInfo.data & (1 << zBit)) > 0 ? AtoB.z : 0;
+
                                     // Basic sphere-ish collision (same as SectorJob)
-                                    float dsq = math.lengthsq(dstBlockLocal - dstTargetCenter);
-                                    if (dsq <= 0.9216f)
+                                    float dsq = math.lengthsq(AtoB);
+                                    if (dsq <= 1.00f)
                                     {
                                         // Prototype: Use SphereSphere directly
                                         DistanceQueries.Result convexDistance = DistanceQueries.PointPoint(
                                             dstBlockLocal + sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS,
-                                            dstTargetCenter + sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS,
-                                            0.48f, 0.96f
+                                            dstBlockLocal + AtoB + sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS,
+                                            0.50f, 1.00f 
                                         );
                                         manifold = new ConvexConvexManifoldQueries.Manifold(convexDistance, worldFromB);
                                         WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
