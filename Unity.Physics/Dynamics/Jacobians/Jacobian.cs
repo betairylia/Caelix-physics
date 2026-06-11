@@ -68,6 +68,15 @@ namespace Unity.Physics
         UserFlag0 = 1 << 2,
         /// <summary>   A binary constant representing the user flag 1 flag. Applies to all jacobians. </summary>
         UserFlag1 = 1 << 3,
+
+        /// <summary>
+        /// Marks a contact jacobian as a bilateral (equality) constraint: the solver drives the
+        /// relative normal velocity to the target exactly, allowing negative impulses, instead of
+        /// clamping the accumulated impulse to be non-negative. Used by voxel-voxel collision when
+        /// two exactly opposing contacts are fused into an emergent joint. Aliases
+        /// <see cref="UserFlag0"/>; applies only to contact jacobians.
+        /// </summary>
+        IsBilateral = UserFlag0,
     }
 
     // Jacobian header, first part of each Jacobian in the stream

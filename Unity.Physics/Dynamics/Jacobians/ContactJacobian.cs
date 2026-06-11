@@ -173,6 +173,12 @@ namespace Unity.Physics
             // if solveVelocity = -1 --> VelToReachCp = +1 (is depenetrating), solveDistance < 0, contact.Distance < 0
             // if solveVelocity = +1 --> VelToReachCp = -1   (is approaching), solveDistance > 0
             solveVelocity = math.max(-maxDepenetrationVelocity, solveVelocity);
+            if ((jacobianHeader.Flags & JacobianFlags.IsBilateral) != 0)
+            {
+                // Bilateral (equality) constraints also pull bodies together to reach the target;
+                // clamp the pull speed symmetrically to the push speed.
+                solveVelocity = math.min(maxDepenetrationVelocity, solveVelocity);
+            }
             jacAngular.VelToReachCp = -solveVelocity;
             jacAngular.ContactDistance = contact.Distance;
 
@@ -287,6 +293,7 @@ namespace Unity.Physics
             ref ContactJacobian contactJacobian = ref jacobianHeader.AccessBaseJacobian<ContactJacobian>();
 
             float sumInvMass = velocityA.InverseMass + velocityB.InverseMass;
+            bool isBilateral = (jacobianHeader.Flags & JacobianFlags.IsBilateral) != 0;
 
             SumImpulsesOverSolverIterations = 0.0f;
             int solveCount = 0; // tracks if a bounce has been solved for the current iteration. Used to update friction
@@ -322,7 +329,9 @@ namespace Unity.Physics
                 }
                 else
                 {
-                    if (newDistanceToCp > 0.0f) jacAngular.ApplyImpulse = false;
+                    // Bilateral (equality) constraints must keep solving even when separated,
+                    // since they also pull the bodies back to the constraint target.
+                    if (newDistanceToCp > 0.0f && !isBilateral) jacAngular.ApplyImpulse = false;
                 }
             }
 
@@ -385,6 +394,10 @@ namespace Unity.Physics
                 tempVelocityB.InverseMass *= jacMod.InverseMassFactorB;
             }
 
+            // Bilateral (equality) contacts solve the relative normal velocity exactly: the
+            // accumulated impulse may go negative (the constraint can pull), forming a joint.
+            bool isBilateral = (jacHeader.Flags & JacobianFlags.IsBilateral) != 0;
+
             float sumImpulses = 0.0f;         // Impulse accumulated across NumContacts for current solve call (across multiple Jacobians)
             bool forceCollisionEvent = false; // Is raised when there is a penetration regardless of impulse conditions
             for (int j = 0; j < BaseJacobian.NumContacts; j++)
@@ -410,8 +423,11 @@ namespace Unity.Physics
 
                 float impulse = dv * jacAngular.Jac.EffectiveMass;
 
-                // Accumulation of impulses for each individual contact point over numSolverIterations. Cannot be negative
-                float jacAccumulatedImpulse = math.max(jacAngular.Jac.Impulse + impulse, 0.0f);
+                // Accumulation of impulses for each individual contact point over numSolverIterations.
+                // Cannot be negative, except for bilateral (equality) constraints.
+                float jacAccumulatedImpulse = isBilateral ?
+                    jacAngular.Jac.Impulse + impulse :
+                    math.max(jacAngular.Jac.Impulse + impulse, 0.0f);
                 if (jacAccumulatedImpulse != jacAngular.Jac.Impulse)
                 {
                     float deltaImpulse = jacAccumulatedImpulse - jacAngular.Jac.Impulse;
@@ -423,7 +439,8 @@ namespace Unity.Physics
                 }
 
                 jacAngular.Jac.Impulse = jacAccumulatedImpulse;      // Update persistent contact point Jacobian
-                sumImpulses += jacAccumulatedImpulse;
+                // Friction strength scales with the magnitude of the normal load either way.
+                sumImpulses += isBilateral ? math.abs(jacAccumulatedImpulse) : jacAccumulatedImpulse;
 
                 // Force contact event even when no impulse is applied, but there is penetration.
                 forceCollisionEvent |= jacAngular.VelToReachCp > 0.0f;
