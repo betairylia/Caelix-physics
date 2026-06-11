@@ -17,23 +17,29 @@ namespace Unity.Physics
         // ---------------------------------------------------------------------------------------
         // Voxel vs voxel contact generation.
         //
-        // Contacts are generated per (A voxel, B grid face direction) and snapped to the voxel
-        // lattice so they can be merged aggressively:
-        //   * Every A surface voxel probes nearby B voxels. For each overlapping solid B voxel the
-        //     contact axis is the B grid axis with the largest separation among the exposed faces
-        //     of the B voxel (SAT-style), so normals are always B grid axis aligned.
-        //   * All contributions for the same (A voxel, face) collapse into one bucket that keeps
-        //     the deepest separation. This is the "floored to voxel center" merge step.
-        //   * If the same A voxel holds buckets for BOTH faces of an axis and both gaps are within
-        //     k_VoxelEqualityMaxGap (a snug fit, e.g. a peg in a same-width hole), the pair is
-        //     fused into a single bilateral (equality) contact at the voxel center. The solver
-        //     treats it as a joint along that axis (impulse may be negative), which is what makes
-        //     emergent voxel machinery rigid instead of jittering between two opposing contacts.
-        //   * Remaining unilateral buckets expand to the 4 lattice corners of the touched face
-        //     (a single point cannot provide rotational support); corners shared between
-        //     neighboring voxels are deduplicated, and each face direction is written as one
-        //     shared manifold (reduced to the support-polygon extremes when above the manifold
-        //     point limit).
+        // Collision model: every voxel is a SPHERE of radius 0.5 at the voxel center, with the
+        // center-to-center direction masked by the touched voxel's face-exposure bits. This is
+        // deliberate ("rounded" voxels):
+        //   * Masking interior directions makes flat surfaces act flat (a voxel resting anywhere
+        //     on a plane sees a pure face normal and a face-plane distance), while real corners
+        //     and edges keep their diagonal normals, so voxel entities behave as if their corners
+        //     were rounded - a 1-wide pole spins/rolls freely in a 1-wide hole.
+        //   * Spheres are rotation invariant, so rotated bodies never jam in snug spaces and the
+        //     contact distance is exact regardless of relative orientation.
+        //
+        // Contacts are snapped to the voxel lattice and merged aggressively:
+        //   * Every (A voxel, masked-direction sign class) pair collapses into one bucket keeping
+        //     the deepest separation ("floored to voxel center" merging). The sign class is the
+        //     per-axis sign of the masked direction (trinary, 26 classes).
+        //   * Buckets of the 6 axis-aligned classes share one manifold per direction (their
+        //     normals are exact); diagonal classes (corner/edge rounding) emit single-point
+        //     manifolds.
+        //   * If one A voxel holds buckets for two exactly opposing classes and both are touching
+        //     within a small slop (a snug fit, e.g. a peg in a same-width hole), the pair fuses
+        //     into a single bilateral (equality) contact at the voxel center. The solver treats it
+        //     as a joint along that direction (impulse may be negative): emergent voxel machinery
+        //     becomes rigid instead of jittering between two opposing contacts, while the
+        //     unconstrained axes still slide/spin freely.
         //
         // Conventions (matching the rest of the narrowphase):
         //   * Manifold normals point from B towards A; positive contact distance is separation.
@@ -52,45 +58,77 @@ namespace Unity.Physics
         /// </summary>
         internal const float k_VoxelEqualityMaxGap = 0.04f;
 
-        // Shrink applied to the lateral overlap test so exactly-touching side faces (offset is a
-        // whole voxel) do not create phantom side contacts from float noise.
-        const float k_VoxelLateralEpsilon = 1e-5f;
+        /// <summary>
+        /// Maximum penetration (per side) for opposing contacts to still fuse into an equality
+        /// constraint. Squeezes deeper than this (i.e. genuinely overlapping bodies) fall back to
+        /// two pushing contacts so the overlap resolves instead of getting glued in place.
+        /// </summary>
+        internal const float k_VoxelEqualityMaxPenetration = 0.25f;
+
+        // Opposing buckets only fuse when their normals are truly anti-parallel. Axis-aligned
+        // classes always are; diagonal (rounded corner) classes only when geometry pinches.
+        const float k_VoxelEqualityMinOpposition = -0.95f;
 
         // Cap on the speculative margin used to size the candidate-cell window. The contact
         // distance gate still uses the full maxDistance; this only bounds the search volume.
         const float k_VoxelMaxSpeculativeMargin = 0.5f;
 
-        // Accumulated data of one (A voxel, B face direction) contact bucket, in B grid space.
+        // Masked direction components smaller than this count as zero (stabilizes the sign class
+        // and avoids near-zero-length normal directions).
+        const float k_VoxelSignDeadzone = 1e-4f;
+
+        // Accumulated data of one (A voxel, sign class) contact bucket, in B grid space.
         struct VoxelContactBucket
         {
-            public float Distance;   // most penetrating separation among all contributing B voxels
-            public float3 PlanePos;  // A voxel center projected onto the supporting B face plane
-            public float3 Center;    // A voxel center
-        }
-
-        struct VoxelCornerPoint
-        {
-            public float Distance;
-            public float3 Pos;       // B grid space
+            public float Distance;    // most penetrating separation among all contributing B voxels
+            public float3 NormalInB;  // unit normal (B grid), points from B towards A
+            public float3 PosInB;     // contact position on B's surface
+            public float3 CenterInB;  // A voxel center
         }
 
         struct VoxelEqualityPoint
         {
-            public int Axis;
-            public float Distance;   // (d(+face) - d(-face)) / 2: drives the voxel to the slack center
-            public float3 Pos;       // B grid space
+            public int Class;         // sign class of the visited bucket (axis classes merge per axis)
+            public float Distance;    // (d_this - d_opposite) / 2: drives the voxel to the slack center
+            public float3 NormalInB;
+            public float3 PosInB;
         }
 
-        // Packs a lattice coordinate plus face index (0..5) into a single key.
-        // Coordinates are biased into a 20 bit unsigned range (supports +-524287 blocks).
-        // Opposing faces of the same coordinate differ only in bit 0 (axis*2 / axis*2+1).
-        static ulong PackVoxelFaceKey(int3 coord, int face)
+        // Trinary sign class of a masked direction: digit per axis in {0:-,1:zero,2:+},
+        // class = dx*9 + dy*3 + dz. Class 13 is the all-zero direction (never stored).
+        // The exactly opposite class is 26 - class.
+        static int VoxelSignClass(float3 maskedDelta)
         {
-            const int bias = 1 << 19;
-            return (ulong)(uint)face
-                | ((ulong)((uint)(coord.x + bias) & 0xFFFFF) << 3)
-                | ((ulong)((uint)(coord.y + bias) & 0xFFFFF) << 23)
-                | ((ulong)((uint)(coord.z + bias) & 0xFFFFF) << 43);
+            int dx = maskedDelta.x > k_VoxelSignDeadzone ? 2 : (maskedDelta.x < -k_VoxelSignDeadzone ? 0 : 1);
+            int dy = maskedDelta.y > k_VoxelSignDeadzone ? 2 : (maskedDelta.y < -k_VoxelSignDeadzone ? 0 : 1);
+            int dz = maskedDelta.z > k_VoxelSignDeadzone ? 2 : (maskedDelta.z < -k_VoxelSignDeadzone ? 0 : 1);
+            return dx * 9 + dy * 3 + dz;
+        }
+
+        // Returns the axis (0..2) when the class has exactly one non-zero digit, else -1.
+        static int VoxelClassAxis(int signClass)
+        {
+            int dx = signClass / 9;
+            int dy = (signClass / 3) % 3;
+            int dz = signClass % 3;
+            int nonZero = (dx != 1 ? 1 : 0) + (dy != 1 ? 1 : 0) + (dz != 1 ? 1 : 0);
+            if (nonZero != 1)
+            {
+                return -1;
+            }
+
+            return dx != 1 ? 0 : (dy != 1 ? 1 : 2);
+        }
+
+        // Packs a lattice coordinate plus sign class (0..26) into a single key.
+        // Coordinates are biased into a 19 bit unsigned range (supports +-262143 blocks).
+        static ulong PackVoxelClassKey(int3 coord, int signClass)
+        {
+            const int bias = 1 << 18;
+            return (ulong)(uint)signClass
+                | ((ulong)((uint)(coord.x + bias) & 0x7FFFF) << 5)
+                | ((ulong)((uint)(coord.y + bias) & 0x7FFFF) << 24)
+                | ((ulong)((uint)(coord.z + bias) & 0x7FFFF) << 43);
         }
 
         internal static unsafe void VoxelVoxel(
@@ -136,14 +174,21 @@ namespace Unity.Physics
 
             MTransform bFromA = Mul(Inverse(worldFromB), worldFromA);
 
-            // Per-axis support radius of a (rotated) unit A voxel cube measured along B's grid
-            // axes: half the absolute row sums of the rotation. Identity rotation gives 0.5.
+            // Conservative per-axis extent of a rotated A sector in B space (for culling only;
+            // the sphere contact metric itself is rotation invariant).
             float3x3 rot = bFromA.Rotation;
             float3 rowAbsSum = math.abs(rot.c0) + math.abs(rot.c1) + math.abs(rot.c2);
-            float3 supportA = 0.5f * rowAbsSum;
 
             float speculative = math.clamp(maxDistance, 0.0f, k_VoxelMaxSpeculativeMargin);
-            float3 windowHalfWidth = 0.5f + supportA + speculative;
+
+            // Candidate cells must lie within sphere reach (center distance 1) plus margin per
+            // axis. Keeping the window this tight is also what keeps the exposure-mask trick
+            // local to face-adjacent surface planes.
+            float windowHalfWidth = 1.0f + speculative;
+
+            // Sphere-sphere contact gate on center distance, squared to avoid sqrt on misses.
+            float maxCenterDistance = 1.0f + maxDistance;
+            float maxCenterDistanceSq = maxCenterDistance * maxCenterDistance;
 
             var buckets = new UnsafeHashMap<ulong, VoxelContactBucket>(512, Allocator.Temp);
 
@@ -220,68 +265,69 @@ namespace Unity.Physics
                                     PhysicsInfo infoB = sectorB.GetSlot<PhysicsInfo>(
                                         SectorSlotId.PhysicsInfo, bx, by, bz);
 
-                                    float3 delta = centerLocalB - (new float3(bx, by, bz) + 0.5f);
+                                    float3 cellCenter = new float3(bx, by, bz) + 0.5f;
+                                    float3 delta = centerLocalB - cellCenter;
 
-                                    // Choose the exposed B face axis with the largest separation.
-                                    // Interior faces (bit not set) can never push, which also means
-                                    // deep interior overlap resolves sideways through the nearest
-                                    // exposed surface instead of inventing a fake normal.
-                                    int bestFace = -1;
-                                    float bestDistance = float.MinValue;
+                                    // Mask out directions whose B face is not exposed: flat
+                                    // surfaces act flat (face-adjacent voxels share one surface
+                                    // plane), interior faces can never push, and a fully interior
+                                    // overlap produces no contact at all instead of a fake normal.
                                     for (int axis = 0; axis < 3; axis++)
                                     {
-                                        float d = delta[axis];
-                                        if (d == 0.0f)
+                                        float c = delta[axis];
+                                        if (c > -k_VoxelSignDeadzone && c < k_VoxelSignDeadzone)
                                         {
-                                            continue; // ambiguous side, another axis will handle it
-                                        }
-
-                                        int face = axis * 2 + (d > 0.0f ? 0 : 1);
-                                        if ((infoB.data & (1 << face)) == 0)
-                                        {
+                                            delta[axis] = 0.0f;
                                             continue;
                                         }
 
-                                        int u = axis == 0 ? 1 : 0;
-                                        int v = axis == 2 ? 1 : 2;
-                                        if (math.abs(delta[u]) >= 0.5f + supportA[u] - k_VoxelLateralEpsilon ||
-                                            math.abs(delta[v]) >= 0.5f + supportA[v] - k_VoxelLateralEpsilon)
+                                        int face = axis * 2 + (c > 0.0f ? 0 : 1);
+                                        if ((infoB.data & (1 << face)) == 0)
                                         {
-                                            continue; // faces do not overlap laterally
-                                        }
-
-                                        float separation = math.abs(d) - (0.5f + supportA[axis]);
-                                        if (separation > bestDistance)
-                                        {
-                                            bestDistance = separation;
-                                            bestFace = face;
+                                            delta[axis] = 0.0f;
                                         }
                                     }
 
-                                    bool isPhysicsContact = bestFace >= 0 && bestDistance < maxDistance;
+                                    float distanceSq = math.lengthsq(delta);
+
+                                    bool isPhysicsContact =
+                                        distanceSq > 0.0f && distanceSq < maxCenterDistanceSq;
                                     float3 worldNormal = float3.zero;
 
                                     if (isPhysicsContact)
                                     {
-                                        int axis = bestFace >> 1;
-                                        float sgn = (bestFace & 1) == 0 ? 1.0f : -1.0f;
+                                        float centerDistance = math.sqrt(distanceSq);
+                                        float3 normalInB = delta / centerDistance;
+                                        float separation = centerDistance - 1.0f; // both radii 0.5
 
-                                        float3 normalInB = float3.zero;
-                                        normalInB[axis] = sgn;
                                         worldNormal = math.mul(worldFromB.Rotation, normalInB);
 
-                                        // A voxel center projected onto the supporting B face plane.
-                                        float3 planePos = centerInB;
-                                        planePos[axis] = sectorOriginB[axis] +
-                                            (axis == 0 ? bx : (axis == 1 ? by : bz)) + 0.5f + sgn * 0.5f;
+                                        int signClass = VoxelSignClass(delta);
+                                        int classAxis = VoxelClassAxis(signClass);
 
-                                        ulong key = PackVoxelFaceKey(voxelCoordA, bestFace);
+                                        // Axis-aligned contacts snap laterally to the A voxel
+                                        // center on the B face plane (mergeable, no phantom
+                                        // torque); diagonal contacts sit on the B sphere surface.
+                                        float3 posInB;
+                                        if (classAxis >= 0)
+                                        {
+                                            posInB = centerInB;
+                                            posInB[classAxis] = sectorOriginB[classAxis] + cellCenter[classAxis]
+                                                + (delta[classAxis] > 0.0f ? 0.5f : -0.5f);
+                                        }
+                                        else
+                                        {
+                                            posInB = (float3)sectorOriginB + cellCenter + 0.5f * normalInB;
+                                        }
+
+                                        ulong key = PackVoxelClassKey(voxelCoordA, signClass);
                                         if (buckets.TryGetValue(key, out VoxelContactBucket bucket))
                                         {
-                                            if (bestDistance < bucket.Distance)
+                                            if (separation < bucket.Distance)
                                             {
-                                                bucket.Distance = bestDistance;
-                                                bucket.PlanePos = planePos;
+                                                bucket.Distance = separation;
+                                                bucket.NormalInB = normalInB;
+                                                bucket.PosInB = posInB;
                                                 buckets[key] = bucket;
                                             }
                                         }
@@ -289,9 +335,10 @@ namespace Unity.Physics
                                         {
                                             buckets.Add(key, new VoxelContactBucket
                                             {
-                                                Distance = bestDistance,
-                                                PlanePos = planePos,
-                                                Center = centerInB
+                                                Distance = separation,
+                                                NormalInB = normalInB,
+                                                PosInB = posInB,
+                                                CenterInB = centerInB
                                             });
                                         }
                                     }
@@ -324,8 +371,9 @@ namespace Unity.Physics
             keysB.Dispose();
         }
 
-        // Fuses opposing buckets into bilateral constraints, expands the rest to deduplicated face
-        // corner points, and writes one shared manifold per face direction / equality axis.
+        // Fuses opposing buckets into bilateral constraints and writes the remaining buckets as
+        // unilateral contacts: one shared manifold per axis-aligned class, single-point manifolds
+        // for diagonal (rounded corner/edge) classes.
         static unsafe void EmitVoxelContactManifolds(
             ref UnsafeHashMap<ulong, VoxelContactBucket> buckets,
             Context context,
@@ -336,108 +384,73 @@ namespace Unity.Physics
         {
             var kv = buckets.GetKeyValueArrays(Allocator.Temp);
 
-            // Pass 1: fuse exactly opposing buckets (same A voxel, same axis, both faces, snug fit)
-            // into single bilateral points at the voxel center.
+            // Pass 1: fuse exactly opposing buckets on the same A voxel into single bilateral
+            // points at the voxel center. Both sides must be touching within the slop: a loose
+            // fit keeps rattling contacts, a deep squeeze keeps pushing contacts (anti-glue).
             var consumedKeys = new UnsafeHashSet<ulong>(16, Allocator.Temp);
             var equalityPoints = new UnsafeList<VoxelEqualityPoint>(16, Allocator.Temp);
 
             for (int i = 0; i < kv.Length; i++)
             {
                 ulong key = kv.Keys[i];
-                if ((key & 1) != 0)
+                int signClass = (int)(key & 0x1F);
+                if (signClass >= 13)
                 {
-                    continue; // visit +faces only; the -face partner is looked up below
+                    continue; // visit the lower-class side only; the partner is looked up below
                 }
 
-                ulong oppositeKey = key | 1;
-                if (!buckets.TryGetValue(oppositeKey, out VoxelContactBucket negBucket))
+                ulong oppositeKey = (key & ~(ulong)0x1F) | (uint)(26 - signClass);
+                if (!buckets.TryGetValue(oppositeKey, out VoxelContactBucket opposite))
                 {
                     continue;
                 }
 
-                VoxelContactBucket posBucket = kv.Values[i];
-                if (math.max(posBucket.Distance, negBucket.Distance) > k_VoxelEqualityMaxGap)
+                VoxelContactBucket bucket = kv.Values[i];
+                if (math.max(bucket.Distance, opposite.Distance) > k_VoxelEqualityMaxGap ||
+                    math.min(bucket.Distance, opposite.Distance) < -k_VoxelEqualityMaxPenetration ||
+                    math.dot(bucket.NormalInB, opposite.NormalInB) > k_VoxelEqualityMinOpposition)
                 {
-                    continue; // loose fit: keep both unilateral contacts so the voxel may rattle
+                    continue;
                 }
 
                 consumedKeys.Add(key);
                 consumedKeys.Add(oppositeKey);
                 equalityPoints.Add(new VoxelEqualityPoint
                 {
-                    Axis = (int)(key & 7) >> 1,
+                    Class = signClass,
                     // Drives the voxel towards the center of the remaining slack; both opposing
                     // sides agree on this target so they cannot fight each other.
-                    Distance = 0.5f * (posBucket.Distance - negBucket.Distance),
-                    Pos = posBucket.Center
+                    Distance = 0.5f * (bucket.Distance - opposite.Distance),
+                    NormalInB = bucket.NormalInB,
+                    PosInB = bucket.CenterInB
                 });
             }
 
-            // Pass 2: expand the remaining unilateral buckets into face corner points on the
-            // half-voxel lattice. A single center point cannot resist tipping, so each face
-            // contributes its 4 corners; corners shared between neighboring voxels merge (keeping
-            // the deepest distance), so an NxM patch costs (N+1)x(M+1) points before reduction.
-            var corners = new UnsafeHashMap<ulong, VoxelCornerPoint>(kv.Length * 4, Allocator.Temp);
-            for (int i = 0; i < kv.Length; i++)
+            // Pass 2: bilateral manifolds. The three axis classes below 13 (4:-x, 10:-y, 12:-z)
+            // have exact shared normals and merge into one manifold per axis; diagonal fusions
+            // (pinched rounded corners, rare) are written individually. Equality points are load
+            // bearing joints, so they are chunked rather than reduced when above the point limit.
+            for (int axisClass = 0; axisClass < 13; axisClass++)
             {
-                ulong key = kv.Keys[i];
-                if (consumedKeys.Contains(key))
+                if (VoxelClassAxis(axisClass) < 0)
                 {
                     continue;
                 }
 
-                VoxelContactBucket bucket = kv.Values[i];
-                int face = (int)(key & 7);
-                int axis = face >> 1;
-                int u = axis == 0 ? 1 : 0;
-                int v = axis == 2 ? 1 : 2;
-
-                for (int cu = -1; cu <= 1; cu += 2)
-                {
-                    for (int cv = -1; cv <= 1; cv += 2)
-                    {
-                        float3 p = bucket.PlanePos;
-                        p[u] += 0.5f * cu;
-                        p[v] += 0.5f * cv;
-
-                        ulong cornerKey = PackVoxelFaceKey((int3)math.round(p * 2.0f), face);
-                        if (corners.TryGetValue(cornerKey, out VoxelCornerPoint corner))
-                        {
-                            if (bucket.Distance < corner.Distance)
-                            {
-                                corner.Distance = bucket.Distance;
-                                corners[cornerKey] = corner;
-                            }
-                        }
-                        else
-                        {
-                            corners.Add(cornerKey, new VoxelCornerPoint
-                            {
-                                Distance = bucket.Distance,
-                                Pos = p
-                            });
-                        }
-                    }
-                }
-            }
-
-            // Pass 3: one bilateral manifold per axis (chunked if above the manifold point limit;
-            // equality points are load bearing joints, so they are never reduced away).
-            for (int axis = 0; axis < 3; axis++)
-            {
-                float3 normalInB = float3.zero;
-                normalInB[axis] = 1.0f;
-
-                var manifold = new ConvexConvexManifoldQueries.Manifold
-                {
-                    Normal = math.mul(worldFromB.Rotation, normalInB)
-                };
+                var manifold = new ConvexConvexManifoldQueries.Manifold();
+                bool normalSet = false;
 
                 for (int i = 0; i < equalityPoints.Length; i++)
                 {
-                    if (equalityPoints[i].Axis != axis)
+                    if (equalityPoints[i].Class != axisClass)
                     {
                         continue;
+                    }
+
+                    if (!normalSet)
+                    {
+                        manifold.Normal = math.mul(worldFromB.Rotation, equalityPoints[i].NormalInB);
+                        normalSet = true;
                     }
 
                     if (manifold.NumContacts == ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts)
@@ -449,12 +462,12 @@ namespace Unity.Physics
 
                     manifold[manifold.NumContacts++] = new ContactPoint
                     {
-                        Position = Mul(worldFromB, equalityPoints[i].Pos),
+                        Position = Mul(worldFromB, equalityPoints[i].PosInB),
                         Distance = equalityPoints[i].Distance
                     };
 
 #if SHOW_DEBUG
-                    Debug.DrawRay(Mul(worldFromB, equalityPoints[i].Pos), manifold.Normal, Color.cyan, 0.0f, false);
+                    Debug.DrawRay(Mul(worldFromB, equalityPoints[i].PosInB), manifold.Normal, Color.cyan, 0.0f, false);
 #endif
                 }
 
@@ -462,19 +475,46 @@ namespace Unity.Physics
                     flipped, JacobianFlags.IsBilateral);
             }
 
-            // Pass 4: one unilateral manifold per face direction, reduced to the support polygon
-            // extremes plus the deepest points when above the manifold point limit.
-            var cornerKv = corners.GetKeyValueArrays(Allocator.Temp);
-            var facePoints = new UnsafeList<VoxelCornerPoint>(math.max(1, cornerKv.Length), Allocator.Temp);
-
-            for (int face = 0; face < 6; face++)
+            for (int i = 0; i < equalityPoints.Length; i++)
             {
-                facePoints.Clear();
-                for (int i = 0; i < cornerKv.Length; i++)
+                if (VoxelClassAxis(equalityPoints[i].Class) >= 0)
                 {
-                    if ((int)(cornerKv.Keys[i] & 7) == face)
+                    continue; // already written above
+                }
+
+                var manifold = new ConvexConvexManifoldQueries.Manifold
+                {
+                    Normal = math.mul(worldFromB.Rotation, equalityPoints[i].NormalInB)
+                };
+                manifold[manifold.NumContacts++] = new ContactPoint
+                {
+                    Position = Mul(worldFromB, equalityPoints[i].PosInB),
+                    Distance = equalityPoints[i].Distance
+                };
+
+                WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB,
+                    flipped, JacobianFlags.IsBilateral);
+            }
+
+            // Pass 3: unilateral manifolds. Axis classes merge into one manifold per direction
+            // (reduced to the support-polygon extremes plus the deepest points when above the
+            // point limit); diagonal classes are written as single-point manifolds.
+            var facePoints = new UnsafeList<VoxelContactBucket>(math.max(1, kv.Length), Allocator.Temp);
+            for (int signClass = 0; signClass < 27; signClass++)
+            {
+                int classAxis = VoxelClassAxis(signClass);
+                if (classAxis < 0)
+                {
+                    continue;
+                }
+
+                facePoints.Clear();
+                for (int i = 0; i < kv.Length; i++)
+                {
+                    ulong key = kv.Keys[i];
+                    if ((int)(key & 0x1F) == signClass && !consumedKeys.Contains(key))
                     {
-                        facePoints.Add(cornerKv.Values[i]);
+                        facePoints.Add(kv.Values[i]);
                     }
                 }
 
@@ -483,9 +523,8 @@ namespace Unity.Physics
                     continue;
                 }
 
-                int axis = face >> 1;
                 float3 normalInB = float3.zero;
-                normalInB[axis] = (face & 1) == 0 ? 1.0f : -1.0f;
+                normalInB[classAxis] = signClass > 13 ? 1.0f : -1.0f;
 
                 var manifold = new ConvexConvexManifoldQueries.Manifold
                 {
@@ -494,37 +533,62 @@ namespace Unity.Physics
 
                 if (facePoints.Length > ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts)
                 {
-                    ReduceFacePoints(ref facePoints, axis, ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts);
+                    ReduceFacePoints(ref facePoints, classAxis, ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts);
                 }
 
                 for (int i = 0; i < facePoints.Length; i++)
                 {
                     manifold[manifold.NumContacts++] = new ContactPoint
                     {
-                        Position = Mul(worldFromB, facePoints[i].Pos),
+                        Position = Mul(worldFromB, facePoints[i].PosInB),
                         Distance = facePoints[i].Distance
                     };
 
 #if SHOW_DEBUG
-                    Debug.DrawRay(Mul(worldFromB, facePoints[i].Pos), manifold.Normal * 0.5f, Color.red, 0.0f, false);
+                    Debug.DrawRay(Mul(worldFromB, facePoints[i].PosInB), manifold.Normal * 0.5f, Color.red, 0.0f, false);
 #endif
                 }
 
                 WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
             }
 
+            for (int i = 0; i < kv.Length; i++)
+            {
+                ulong key = kv.Keys[i];
+                int signClass = (int)(key & 0x1F);
+                if (VoxelClassAxis(signClass) >= 0 || consumedKeys.Contains(key))
+                {
+                    continue;
+                }
+
+                VoxelContactBucket bucket = kv.Values[i];
+                var manifold = new ConvexConvexManifoldQueries.Manifold
+                {
+                    Normal = math.mul(worldFromB.Rotation, bucket.NormalInB)
+                };
+                manifold[manifold.NumContacts++] = new ContactPoint
+                {
+                    Position = Mul(worldFromB, bucket.PosInB),
+                    Distance = bucket.Distance
+                };
+
+#if SHOW_DEBUG
+                Debug.DrawRay(Mul(worldFromB, bucket.PosInB), manifold.Normal * 0.5f, Color.yellow, 0.0f, false);
+#endif
+
+                WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
+            }
+
             facePoints.Dispose();
-            cornerKv.Dispose();
-            corners.Dispose();
             equalityPoints.Dispose();
             consumedKeys.Dispose();
             kv.Dispose();
         }
 
-        // In-place selection of up to maxPoints from a face point set: the 8 lateral extreme
-        // points (the support polygon rim, which gives rocking stability) plus the deepest of the
-        // rest. Order within the list is not meaningful.
-        static void ReduceFacePoints(ref UnsafeList<VoxelCornerPoint> points, int axis, int maxPoints)
+        // In-place selection of up to maxPoints from an axis-class point set: the 8 lateral
+        // extreme points (the support polygon rim, which gives rocking stability) plus the
+        // deepest of the rest. Order within the list is not meaningful.
+        static void ReduceFacePoints(ref UnsafeList<VoxelContactBucket> points, int axis, int maxPoints)
         {
             int u = axis == 0 ? 1 : 0;
             int v = axis == 2 ? 1 : 2;
@@ -548,7 +612,7 @@ namespace Unity.Physics
                 float bestScore = float.MinValue;
                 for (int i = 0; i < points.Length; i++)
                 {
-                    float score = points[i].Pos[u] * du + points[i].Pos[v] * dv;
+                    float score = points[i].PosInB[u] * du + points[i].PosInB[v] * dv;
                     if (score > bestScore)
                     {
                         bestScore = score;
