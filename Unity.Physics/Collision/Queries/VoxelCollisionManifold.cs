@@ -1,4 +1,4 @@
-// #define SHOW_DEBUG
+#define SHOW_DEBUG
 
 using Unity.Burst;
 using Unity.Collections;
@@ -131,6 +131,7 @@ namespace Unity.Physics
             return dx != 1 ? 0 : (dy != 1 ? 1 : 2);
         }
 
+        // TODO: Maybe we should not have limit it to 262143 blocks?
         // Packs a lattice coordinate plus sign class (0..26) into a single key.
         // Coordinates are biased into a 19 bit unsigned range (supports +-262143 blocks).
         static ulong PackVoxelClassKey(int3 coord, int signClass)
@@ -230,6 +231,7 @@ namespace Unity.Physics
 
             float speculative = math.clamp(maxDistance, 0.0f, k_VoxelMaxSpeculativeMargin);
 
+            // TODO: Check this thing's tightness.
             // Candidate cells must lie within sphere reach (center distance 1) plus margin per
             // axis. Keeping the window this tight is also what keeps the exposure-mask trick
             // local to face-adjacent surface planes.
@@ -242,6 +244,7 @@ namespace Unity.Physics
             var keysA = sectorsA.GetKeyArray(Allocator.Temp);
             var keysB = sectorsB.GetKeyArray(Allocator.Temp);
 
+            // TODO: Maybe optimize this nested O(N_sector_A * N_sector_B) loop? Perhaps this is not needed.
             for (int iSectorA = 0; iSectorA < keysA.Length; iSectorA++)
             {
                 int3 sectorCoordA = keysA[iSectorA];
@@ -286,6 +289,7 @@ namespace Unity.Physics
                         float3 centerInB = Mul(bFromA, (float3)voxelCoordA + 0.5f);
                         float3 centerLocalB = centerInB - (float3)sectorOriginB;
 
+                        // TODO: Check this thing's tightness.
                         // Candidate B cells whose centers lie within the search window, clamped to
                         // this sector (other sectors of B get their own pass of the outer loop).
                         int3 lo = (int3)math.ceil(centerLocalB - 0.5f - windowHalfWidth);
@@ -364,6 +368,8 @@ namespace Unity.Physics
                                     }
 
                                     int3 voxelCoordB = sectorOriginB + new int3(bx, by, bz);
+
+                                    Debug.Log(separation);
 
                                     ulong key = PackVoxelClassKey(voxelCoordA, signClass);
                                     if (buckets.TryGetValue(key, out VoxelContactBucket bucket))
@@ -536,6 +542,7 @@ namespace Unity.Physics
                     continue; // already written above
                 }
 
+                // Basically we shouldn't really visit anything below here in this loop
                 var manifold = new ConvexConvexManifoldQueries.Manifold
                 {
                     Normal = math.mul(worldFromB.Rotation, equalityPoints[i].NormalInB)
@@ -585,6 +592,7 @@ namespace Unity.Physics
                     Normal = math.mul(worldFromB.Rotation, normalInB)
                 };
 
+                // TODO: Should we use k_MaxNumContacts? It is default to 32, which sounds quite large.
                 if (facePoints.Length > ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts)
                 {
                     ReduceFacePoints(ref facePoints, classAxis, ConvexConvexManifoldQueries.Manifold.k_MaxNumContacts);
