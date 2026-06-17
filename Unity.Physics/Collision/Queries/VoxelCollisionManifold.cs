@@ -467,14 +467,22 @@ namespace Unity.Physics
             // Reduced contact events: one per merged bucket.
             for (int i = 0; i < kv.Length; i++)
             {
+                ulong key = kv.Keys[i];
                 VoxelContactBucket bucket = kv.Values[i];
-                int3 voxelCoordA = UnpackVoxelCoord(kv.Keys[i]);
+                int3 voxelCoordA = UnpackVoxelCoord(key);
+
+                byte debugFlags = 0;
+                if (consumedKeys.Contains(key)) debugFlags |= VoxelContactEventData.FlagBilateral;
+                if (VoxelClassAxis((int)(key & 0x1F)) < 0) debugFlags |= VoxelContactEventData.FlagDiagonal;
+
                 context.VoxelContactWriter->Write(new VoxelContactEventData
                 {
                     BodyIndices = context.BodyIndices,
                     VoxelCoordsInA = flipped ? bucket.VoxelB : voxelCoordA,
                     VoxelCoordsInB = flipped ? voxelCoordA : bucket.VoxelB,
                     Normal = math.mul(worldFromB.Rotation, bucket.NormalInB),
+                    Distance = bucket.Distance,
+                    DebugFlags = debugFlags,
                     isPhysicsContact = true
                 });
             }

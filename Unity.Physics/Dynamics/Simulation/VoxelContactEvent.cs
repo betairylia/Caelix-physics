@@ -41,7 +41,7 @@ namespace Unity.Physics
         /// <value> The voxel coordinates in B. </value>
         public int3 VoxelCoordsInB => EventData.VoxelCoordsInB;
 
-        /// <summary>   Gets the contact normal (from A to B). </summary>
+        /// <summary>   Gets the contact normal (from B to A, world space). </summary>
         ///
         /// <value> The normal vector. </value>
         public float3 Normal => EventData.Normal;
@@ -50,6 +50,15 @@ namespace Unity.Physics
         ///
         /// <value> True if the contact affects the physics simulation. </value>
         public bool IsPhysicsContact => EventData.isPhysicsContact;
+
+        /// <summary>   Gets the separating distance along the normal (negative = penetrating). </summary>
+        public float Distance => EventData.Distance;
+
+        /// <summary>   True if this contact was fused into a bilateral (equality) constraint. </summary>
+        public bool IsBilateral => (EventData.DebugFlags & VoxelContactEventData.FlagBilateral) != 0;
+
+        /// <summary>   True if this contact uses a diagonal (rounded corner/edge) normal, not a grid axis. </summary>
+        public bool IsDiagonal => (EventData.DebugFlags & VoxelContactEventData.FlagDiagonal) != 0;
 
         /// <summary>
         /// Compares this VoxelContactEvent object to another to determine their relative ordering.
@@ -145,10 +154,15 @@ namespace Unity.Physics
     /// </summary>
     internal struct VoxelContactEventData
     {
+        public const byte FlagBilateral = 1 << 0;
+        public const byte FlagDiagonal = 1 << 1;
+
         public BodyIndexPair BodyIndices;
         public int3 VoxelCoordsInA;
         public int3 VoxelCoordsInB;
         public float3 Normal;
+        public float Distance;        // separating distance along Normal (negative = penetrating)
+        public byte DebugFlags;       // FlagBilateral | FlagDiagonal
         public bool isPhysicsContact; // May change to a bitmask flag later (byte).
     }
 }
