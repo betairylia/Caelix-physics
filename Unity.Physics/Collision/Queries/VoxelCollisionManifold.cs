@@ -369,8 +369,6 @@ namespace Unity.Physics
 
                                     int3 voxelCoordB = sectorOriginB + new int3(bx, by, bz);
 
-                                    Debug.Log(separation);
-
                                     ulong key = PackVoxelClassKey(voxelCoordA, signClass);
                                     if (buckets.TryGetValue(key, out VoxelContactBucket bucket))
                                     {
