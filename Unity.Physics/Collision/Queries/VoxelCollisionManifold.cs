@@ -74,7 +74,21 @@ namespace Unity.Physics
             public float3 PosInB;     // contact position on B's surface
             public int3 VoxelA;       // contributing A voxel (A grid)
             public int3 VoxelB;       // contributing B voxel (B grid)
-            public bool Diagonal;     // corner/edge rounding contact (not an axis-face contact)
+            // public bool Diagonal;     // corner/edge rounding contact (not an axis-face contact)
+
+            // Bin assignment of this contact point.
+            // Contact points are binned by their normal directions.
+            // The masking step computes corrected normals and bin assignments from raw normals (raw Avoxel-Bvoxel center differences) and face masks (PhysicsInfo slot).
+            // Let the rank of a contact be the number of constraints the contact normal must satisfy. 1 unexposed face corresponds to 1 constraint (dot-product = 0).
+            // Bins are arranged by:
+            //   0     - Rank-0 (Corner-Corner) or Rank-1 (Corner-Edge) contacts
+            //   1-3   - Constraint on Entity A's YZ, XZ or XY axes (i.e., normal is A's X, Y and Z)
+            //   4-6   - Constraint on Entity B's YZ, XZ or XY axes (i.e., normal is B's X, Y and Z)
+            //   7-15  - Constraint on {Entity A's X, Y, Z} x {Entity B's X, Y, Z} axes (i.e., normal is computed via cross-product)
+            // Negative bin value is possible and it represents negative direction in the corresponding constrainted axis.
+            // In following stages, bin info will be used to further merge contacts.
+            // "Rank-3 and Rank-4" contacts should be omitted / ignored and not creating any contacts. Instead, the solver should rely on Rank-0/1/2 contacts only.
+            public int normalBin;
         }
 
         internal static unsafe void VoxelVoxel(
