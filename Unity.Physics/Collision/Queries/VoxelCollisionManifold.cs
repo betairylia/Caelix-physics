@@ -6,6 +6,11 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using Voxelis;
 using static Unity.Physics.Math;
+using System;
+using NUnit.Framework;
+
+
+
 #if SHOW_DEBUG
 using UnityEngine;
 #endif
@@ -138,6 +143,86 @@ namespace Unity.Physics
             contacts.Dispose();
         }
 
+        private static bool ApplyNormalMasking(
+            float3 delta, PhysicsInfo infoA, PhysicsInfo infoB, MTransform bFromA,
+            out float3 maskedDelta, out float3 normalBin)
+        {
+            maskedDelta = delta;
+
+            // Mask out directions whose B face is not exposed: flat
+            // surfaces act flat (face-adjacent voxels share one surface
+            // plane), interior faces can never push, and a fully interior
+            // overlap produces no contact at all instead of a fake normal.
+            // Masking is footprint-gated: beyond the cell's own footprint
+            // on an unexposed axis, the neighbor owns the surface facing
+            // A and this cell emits nothing (see header).
+            for (int axis = 0; axis < 3; axis++)
+            {
+                float c = delta[axis];
+                // if (c > -k_VoxelSignDeadzone && c < k_VoxelSignDeadzone)
+                // {
+                //     maskedDelta[axis] = 0.0f;
+                //     continue;
+                // }
+
+                int face = axis * 2 + (c > 0.0f ? 0 : 1);
+                if ((infoB.data & (1 << face)) == 0)
+                {
+                    if (c > k_VoxelFootprintHalfWidth || c < -k_VoxelFootprintHalfWidth)
+                    {
+                        normalBin = 0;
+                        return false;
+                    }
+
+                    // maskedDelta[axis] = 0.0f;
+                }
+            }
+
+            int numConstraintsA = ((~infoA.data) >> 6);
+            int numConstraintsB = ((~infoB.data) >> 6);
+
+            // TODO: Check degenerate case?
+
+            if (numConstraintsA + numConstraintsB > 2)
+            {
+                normalBin = 0;
+                return false;
+            }
+
+            // Find constraint axes
+            bool constraintFound = false;
+            float3 constraint = float3.zero;
+
+            for (int obj = 0; obj < 2; obj++)
+            {
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    float3 constraintAxis;
+                    switch(obj*3 + axis)
+                    {
+                        case 0: // A's X
+                            constraintAxis = bFromA.Rotation[0];
+                            break;
+                        case 3: // B's X
+                            constraintAxis = new float3(1, 0, 0);
+                            break;
+                        case 4: // B's Y
+                    }
+
+                    float c = delta[axis];
+                    int face = axis * 2 + (c > 0.0f ? 0 : 1);
+
+                    // Face should be masked
+                    if ((infoB.data & (1 << face)) == 0)
+                    {
+                        if (!constraintFound) { constraint =  }
+                    }
+                }
+            }
+
+            throw new NotImplementedException();
+        }
+
         // For every exposed A voxel, probe the B cells within sphere reach, mask the
         // center-to-center direction by B's face exposure (footprint-gated, see header), and
         // append one raw contact per surviving probe.
@@ -250,49 +335,24 @@ namespace Unity.Physics
                                     float3 cellCenter = new float3(bx, by, bz) + 0.5f;
                                     float3 delta = centerLocalB - cellCenter;
 
-                                    // Mask out directions whose B face is not exposed: flat
-                                    // surfaces act flat (face-adjacent voxels share one surface
-                                    // plane), interior faces can never push, and a fully interior
-                                    // overlap produces no contact at all instead of a fake normal.
-                                    // Masking is footprint-gated: beyond the cell's own footprint
-                                    // on an unexposed axis, the neighbor owns the surface facing
-                                    // A and this cell emits nothing (see header).
-                                    bool ownedByNeighbor = false;
-                                    for (int axis = 0; axis < 3; axis++)
-                                    {
-                                        float c = delta[axis];
-                                        if (c > -k_VoxelSignDeadzone && c < k_VoxelSignDeadzone)
-                                        {
-                                            delta[axis] = 0.0f;
-                                            continue;
-                                        }
+                                    // Apply normal masking and filter phantoms & face-edge & face-face
+                                    bool shouldProceed = ApplyNormalMasking(delta, infoA, infoB, bFromA, out float3 maskedDelta, out int normalBin);
 
-                                        int face = axis * 2 + (c > 0.0f ? 0 : 1);
-                                        if ((infoB.data & (1 << face)) == 0)
-                                        {
-                                            if (c > k_VoxelFootprintHalfWidth || c < -k_VoxelFootprintHalfWidth)
-                                            {
-                                                ownedByNeighbor = true;
-                                                break;
-                                            }
-
-                                            delta[axis] = 0.0f;
-                                        }
-                                    }
-
-                                    if (ownedByNeighbor)
+                                    if (!shouldProceed)
                                     {
                                         continue;
                                     }
 
-                                    float distanceSq = math.lengthsq(delta);
+                                    // Check distance
+
+                                    float distanceSq = math.lengthsq(maskedDelta);
                                     if (distanceSq <= 0.0f || distanceSq >= maxCenterDistanceSq)
                                     {
                                         continue;
                                     }
 
                                     float centerDistance = math.sqrt(distanceSq);
-                                    float3 normalInB = delta / centerDistance;
+                                    float3 normalInB = maskedDelta / centerDistance;
                                     float separation = centerDistance - 1.0f; // both radii 0.5
 
                                     // Exactly one non-zero component left after masking makes an
@@ -301,7 +361,7 @@ namespace Unity.Physics
                                     int nonZero = 0;
                                     for (int axis = 0; axis < 3; axis++)
                                     {
-                                        if (delta[axis] != 0.0f)
+                                        if (maskedDelta[axis] != 0.0f)
                                         {
                                             nonZero++;
                                             faceAxis = axis;
@@ -322,7 +382,7 @@ namespace Unity.Physics
                                     {
                                         posInB = centerInB;
                                         posInB[faceAxis] = sectorOriginB[faceAxis] + cellCenter[faceAxis]
-                                            + (delta[faceAxis] > 0.0f ? 0.5f : -0.5f);
+                                            + (maskedDelta[faceAxis] > 0.0f ? 0.5f : -0.5f);
                                     }
                                     else
                                     {
@@ -336,7 +396,7 @@ namespace Unity.Physics
                                         PosInB = posInB,
                                         VoxelA = voxelCoordA,
                                         VoxelB = sectorOriginB + new int3(bx, by, bz),
-                                        Diagonal = faceAxis < 0
+                                        // Diagonal = faceAxis < 0
                                     });
                                 }
                             }
@@ -351,6 +411,7 @@ namespace Unity.Physics
 
         // Writes one single-point manifold and one contact event per raw contact. No merging,
         // no reduction: this is the raw generation output the future merging algorithm builds on.
+
         static unsafe void WriteVoxelManifolds(
             in UnsafeList<VoxelContact> contacts,
             Context context,
