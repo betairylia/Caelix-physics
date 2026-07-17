@@ -153,7 +153,7 @@ namespace Unity.Physics
         }
 
         private static unsafe void WriteManifold(ConvexConvexManifoldQueries.Manifold manifold, Context context, ColliderKeyPair colliderKeys,
-            Material materialA, Material materialB, bool flipped, JacobianFlags additionalFlags = 0)
+            Material materialA, Material materialB, bool flipped)
         {
             // Write results to stream
             if (manifold.NumContacts > 0)
@@ -208,13 +208,6 @@ namespace Unity.Physics
                     {
                         header.JacobianFlags |= JacobianFlags.EnableDetailedStaticMeshCollision;
                     }
-                }
-
-                header.JacobianFlags |= additionalFlags;
-                if ((additionalFlags & JacobianFlags.IsBilateral) != 0)
-                {
-                    // Bilateral (equality) constraints are joints, not impacts: never bounce.
-                    header.CoefficientOfRestitution = 0.0f;
                 }
 
                 context.ContactWriter->Write(header);
