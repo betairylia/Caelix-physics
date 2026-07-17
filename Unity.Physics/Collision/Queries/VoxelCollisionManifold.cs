@@ -203,6 +203,10 @@ namespace Unity.Physics
                         float3 centerLocalB = centerInB - (float3)sectorOriginB;
 
                         // TODO: Check this thing's tightness.
+                        // TODO: FIXME: The lo-hi AABB is too loose to ensure interior voxels are not visited
+                        // in below loop, and renders the necessity of ownedByNeighbor. It should be possible
+                        // to completely remove this additional flag for simplicity and correctness.
+
                         // Candidate B cells whose centers lie within the search window, clamped to
                         // this sector (other sectors of B get their own pass of the outer loop).
                         int3 lo = (int3)math.ceil(centerLocalB - 0.5f - windowHalfWidth);
@@ -295,6 +299,7 @@ namespace Unity.Physics
                                         faceAxis = -1;
                                     }
 
+                                    // TODO: Do we really need this snap?
                                     // Axis-aligned contacts snap laterally to the A voxel center
                                     // on the B face plane (no phantom torque); diagonal contacts
                                     // sit on the B sphere surface.
