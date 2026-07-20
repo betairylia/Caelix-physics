@@ -71,6 +71,8 @@ namespace Unity.Physics
         // boundaries (both cells emit the same plane contact inside the margin band).
         const float k_VoxelFootprintHalfWidth = 0.55f;
 
+        const float k_VoxelConstraintEdgeEdgeDegenerationThreshold = 0.9f;
+
         // One raw generated contact, in B grid space.
         struct VoxelContact
         {
@@ -145,82 +147,193 @@ namespace Unity.Physics
 
         private static bool ApplyNormalMasking(
             float3 delta, PhysicsInfo infoA, PhysicsInfo infoB, MTransform bFromA,
-            out float3 maskedDelta, out float3 normalBin)
+            out float3 maskedDelta, out int normalBin)
         {
             maskedDelta = delta;
 
-            // Mask out directions whose B face is not exposed: flat
-            // surfaces act flat (face-adjacent voxels share one surface
-            // plane), interior faces can never push, and a fully interior
-            // overlap produces no contact at all instead of a fake normal.
-            // Masking is footprint-gated: beyond the cell's own footprint
-            // on an unexposed axis, the neighbor owns the surface facing
-            // A and this cell emits nothing (see header).
-            for (int axis = 0; axis < 3; axis++)
-            {
-                float c = delta[axis];
-                // if (c > -k_VoxelSignDeadzone && c < k_VoxelSignDeadzone)
-                // {
-                //     maskedDelta[axis] = 0.0f;
-                //     continue;
-                // }
+            // Flags bits store 3 - (solid-surrounded axis count); ~ over the int-promoted
+            // byte sets bits 8..31, so mask back down to the 2-bit field.
+            // TODO: FIXME: This does not align with the true constraint rank when half-constraints exists.
+            // But, How do we correctly count number of constraints for half-constraints (boundary voxels)?
+            int numConstraintsA_upperBound = ((~infoA.data) >> 6) & 0b11;
+            int numConstraintsB_upperBound = ((~infoB.data) >> 6) & 0b11;
+            int numConstraintsTotal_upperBound = numConstraintsA_upperBound + numConstraintsB_upperBound;
 
-                int face = axis * 2 + (c > 0.0f ? 0 : 1);
-                if ((infoB.data & (1 << face)) == 0)
-                {
-                    if (c > k_VoxelFootprintHalfWidth || c < -k_VoxelFootprintHalfWidth)
-                    {
-                        normalBin = 0;
-                        return false;
-                    }
-
-                    // maskedDelta[axis] = 0.0f;
-                }
-            }
-
-            int numConstraintsA = ((~infoA.data) >> 6);
-            int numConstraintsB = ((~infoB.data) >> 6);
+            // TODO: Skip some corner-corner cases where (data & 0x3F) == 0x3F?
 
             // TODO: Check degenerate case?
-
-            if (numConstraintsA + numConstraintsB > 2)
+            // Allow only CORNER-FACE (0+2) & EDGE-EDGE (1+1) pairs.
+            if (numConstraintsTotal_upperBound > 2)
             {
                 normalBin = 0;
                 return false;
             }
 
             // Find constraint axes
-            bool constraintFound = false;
-            float3 constraint = float3.zero;
+            float3 constraintA = float3.zero, constraintB = float3.zero;
 
-            for (int obj = 0; obj < 2; obj++)
+            int numConstraintsA = 0, numConstraintsB = 0;
+            int _debug_constraintRecord = 0;
+
+            // Start from B, then A; B's constraints takes priority.
+            // We cannot determine #constraints before checking the side of axis (computing `c`).
+            // Furthermore, even if we may have more than 2 constarints, we cannot simply drop e.g., an EDGE-EDGE
+            // with 3 constraints since there will be no fallback neighbors to catch the actual collision.
+            // To handle this case, we priortize B's constraints rather than drop rank>2 collisions.
+            for (int obj = 1; obj >= 0; obj--)
             {
                 for (int axis = 0; axis < 3; axis++)
                 {
+                    // A's axes expressed in B space are the columns of bFromA.Rotation
+                    // (v_B = Rotation * v_A); B's axes in B space are the identity basis.
                     float3 constraintAxis;
-                    switch(obj*3 + axis)
+                    int dataToRef = infoA.data;
+                    int axisID = obj * 3 + axis;
+                    switch (axisID)
                     {
                         case 0: // A's X
                             constraintAxis = bFromA.Rotation[0];
                             break;
+                        case 1: // A's Y
+                            constraintAxis = bFromA.Rotation[1];
+                            break;
+                        case 2: // A's Z
+                            constraintAxis = bFromA.Rotation[2];
+                            break;
                         case 3: // B's X
                             constraintAxis = new float3(1, 0, 0);
+                            dataToRef = infoB.data;
                             break;
                         case 4: // B's Y
+                            constraintAxis = new float3(0, 1, 0);
+                            dataToRef = infoB.data;
+                            break;
+                        default: // 5: B's Z
+                            constraintAxis = new float3(0, 0, 1);
+                            dataToRef = infoB.data;
+                            break;
                     }
 
-                    float c = delta[axis];
+                    float c = math.dot(obj == 0 ? (-delta) : delta, constraintAxis);
                     int face = axis * 2 + (c > 0.0f ? 0 : 1);
 
-                    // Face should be masked
-                    if ((infoB.data & (1 << face)) == 0)
+                    // Mask out directions whose A or B face is not exposed: flat
+                    // surfaces act flat (face-adjacent voxels share one surface
+                    // plane), interior faces can never push, and a fully interior
+                    // overlap produces no contact at all instead of a fake normal.
+                    // Masking is footprint-gated: beyond the cell's own footprint
+                    // on an unexposed axis, the neighbor owns the surface facing
+                    // A and this cell emits nothing (see header).
+                    if ((dataToRef & (1 << face)) == 0)
                     {
-                        if (!constraintFound) { constraint =  }
+                        // Skip phantom contacts
+                        if (c > k_VoxelFootprintHalfWidth || c < -k_VoxelFootprintHalfWidth)
+                        {
+                            normalBin = 0;
+                            return false;
+                        }
+
+                        _debug_constraintRecord += axisID * (int)math.exp10(numConstraintsA + numConstraintsB);
+
+                        switch (obj)
+                        {
+                            case 0:
+                                if (numConstraintsA == 0) { constraintA = constraintAxis; }
+                                else { constraintA = math.cross(constraintA, constraintAxis); }
+                                numConstraintsA++;
+                                break;
+                            case 1:
+                                if (numConstraintsB == 0) { constraintB = constraintAxis; }
+                                else { constraintB = math.cross(constraintB, constraintAxis); }
+                                numConstraintsB++;
+                                break;
+                        }
                     }
+                }
+
+                // We already found enough constraints
+                if (numConstraintsB == 2)
+                {
+                    break;
                 }
             }
 
-            throw new NotImplementedException();
+            // Interior. How can this happen?
+            if (numConstraintsA > 2 || numConstraintsB > 2)
+            {
+                normalBin = 0;
+                return false;
+            }
+
+            //////////////////////////////////////
+            /// Pick the correct constraint set
+            //////////////////////////////////////
+
+            float3 constraint = float3.zero;
+            int numConstraintsTotal = 0;
+
+            // Case. Clean edge-to-edge
+            if (numConstraintsA == 1 && numConstraintsB == 1)
+            {
+                // Degenerate case
+                if(math.abs(math.dot(constraintA, constraintB)) > k_VoxelConstraintEdgeEdgeDegenerationThreshold)
+                {
+                    constraint = constraintB;
+                    numConstraintsTotal = numConstraintsB;
+                }
+                else
+                {
+                    constraint = math.normalize(math.cross(constraintB, constraintA));
+                    numConstraintsTotal = 2;
+                }
+            }
+            // Case. Use A
+            else if (numConstraintsB < 2)
+            {
+                constraint = constraintA;
+                numConstraintsTotal = numConstraintsA;
+            }
+            // Case. Use B
+            else if (numConstraintsA < 2)
+            {
+                constraint = constraintB;
+                numConstraintsTotal = numConstraintsB;
+            }
+            // We should not reach this
+            else
+            {
+                throw new Exception("Bad contact constraints. How possibly can this happen?");
+            }
+
+            ///////////////////////////
+            /// Apply constraints
+            ///////////////////////////
+            
+            if (numConstraintsTotal == 0)
+            {
+                // No constraints in the half of delta, do nothing
+                normalBin = 0;
+            }
+            else if (numConstraintsTotal == 1)
+            {
+                maskedDelta = maskedDelta - math.dot(delta, constraint) * constraint;
+                // TODO: How to compute bin?
+                normalBin = 0;
+            }
+            else
+            {
+                maskedDelta = math.dot(delta, constraint) * constraint;
+                if (math.abs(math.dot(delta, constraint)) < 0.5f)
+                {
+                    Debug.Log("!");
+                    Debug.Log($"Delta: {delta} | Constraint: {constraint} => Masked: {maskedDelta}");
+                }
+                // TODO: How to compute bin?
+                normalBin = 0;
+            }
+
+            normalBin = _debug_constraintRecord;
+            return true;
         }
 
         // For every exposed A voxel, probe the B cells within sphere reach, mask the
@@ -396,6 +509,7 @@ namespace Unity.Physics
                                         PosInB = posInB,
                                         VoxelA = voxelCoordA,
                                         VoxelB = sectorOriginB + new int3(bx, by, bz),
+                                        normalBin = normalBin
                                         // Diagonal = faceAxis < 0
                                     });
                                 }
@@ -425,10 +539,10 @@ namespace Unity.Physics
                 VoxelContact contact = contacts[i];
 
                 byte debugFlags = 0;
-                if (contact.Diagonal)
-                {
-                    debugFlags |= VoxelContactEventData.FlagDiagonal;
-                }
+                // if (contact.Diagonal)
+                // {
+                //     debugFlags |= VoxelContactEventData.FlagDiagonal;
+                // }
 
                 context.VoxelContactWriter->Write(new VoxelContactEventData
                 {
@@ -438,7 +552,9 @@ namespace Unity.Physics
                     Normal = math.mul(worldFromB.Rotation, contact.NormalInB),
                     Distance = contact.Distance,
                     DebugFlags = debugFlags,
-                    isPhysicsContact = true
+                    isPhysicsContact = true,
+
+                    _debug_constraintRecord = contact.normalBin
                 });
 
                 var manifold = new ConvexConvexManifoldQueries.Manifold
@@ -453,7 +569,7 @@ namespace Unity.Physics
 
 #if SHOW_DEBUG
                 Debug.DrawRay(Mul(worldFromB, contact.PosInB), manifold.Normal * 0.5f,
-                    contact.Diagonal ? Color.yellow : Color.red, 0.0f, false);
+                    Color.red, 0.0f, false);
 #endif
 
                 WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);

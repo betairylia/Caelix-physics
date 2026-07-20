@@ -68,6 +68,8 @@ namespace Unity.Physics
         /// greater.
         /// </returns>
         // public int CompareTo(VoxelContactEvent other) => ISimulationEventUtilities.CompareEvents(this, other);
+
+        public int _debug_constraintRecord => EventData._debug_constraintRecord;
     }
 
     /// <summary>
@@ -160,5 +162,7 @@ namespace Unity.Physics
         public float Distance;        // separating distance along Normal (negative = penetrating)
         public byte DebugFlags;       // FlagDiagonal
         public bool isPhysicsContact; // May change to a bitmask flag later (byte).
+
+        public int _debug_constraintRecord;
     }
 }
