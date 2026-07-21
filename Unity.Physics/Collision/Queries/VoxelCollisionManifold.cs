@@ -155,15 +155,15 @@ namespace Unity.Physics
             // byte sets bits 8..31, so mask back down to the 2-bit field.
             // TODO: FIXME: This does not align with the true constraint rank when half-constraints exists.
             // But, How do we correctly count number of constraints for half-constraints (boundary voxels)?
-            int numConstraintsA_upperBound = ((~infoA.data) >> 6) & 0b11;
-            int numConstraintsB_upperBound = ((~infoB.data) >> 6) & 0b11;
-            int numConstraintsTotal_upperBound = numConstraintsA_upperBound + numConstraintsB_upperBound;
+            int numConstraintsA_lowerBound = ((~infoA.data) >> 6) & 0b11;
+            int numConstraintsB_lowerBound = ((~infoB.data) >> 6) & 0b11;
+            int numConstraintsTotal_lowerBound = numConstraintsA_lowerBound + numConstraintsB_lowerBound;
 
             // TODO: Skip some corner-corner cases where (data & 0x3F) == 0x3F?
 
             // TODO: Check degenerate case?
             // Allow only CORNER-FACE (0+2) & EDGE-EDGE (1+1) pairs.
-            if (numConstraintsTotal_upperBound > 2)
+            if (numConstraintsTotal_lowerBound > 2)
             {
                 normalBin = 0;
                 return false;
@@ -288,16 +288,22 @@ namespace Unity.Physics
                 }
             }
             // Case. Use A
-            else if (numConstraintsB < 2)
+            else if (numConstraintsA > 0 && numConstraintsB < 2)
             {
                 constraint = constraintA;
                 numConstraintsTotal = numConstraintsA;
             }
             // Case. Use B
-            else if (numConstraintsA < 2)
+            else if (numConstraintsB > 0 && numConstraintsA < 2)
             {
                 constraint = constraintB;
                 numConstraintsTotal = numConstraintsB;
+            }
+            // Case. No constraints
+            else if (numConstraintsA == 0 && numConstraintsB == 0)
+            {
+                normalBin = 0;
+                return true;
             }
             // We should not reach this
             else
