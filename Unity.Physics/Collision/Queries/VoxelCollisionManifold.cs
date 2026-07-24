@@ -329,11 +329,11 @@ namespace Unity.Physics
             else
             {
                 maskedDelta = math.dot(delta, constraint) * constraint;
-                if (math.abs(math.dot(delta, constraint)) < 0.5f)
-                {
-                    Debug.Log("!");
-                    Debug.Log($"Delta: {delta} | Constraint: {constraint} => Masked: {maskedDelta}");
-                }
+                // if (math.abs(math.dot(delta, constraint)) < 0.5f)
+                // {
+                //     Debug.Log("!");
+                //     Debug.Log($"Delta: {delta} | Constraint: {constraint} => Masked: {maskedDelta}");
+                // }
                 // TODO: How to compute bin?
                 normalBin = 0;
             }
