@@ -401,7 +401,7 @@ class HullGenerationTest : MonoBehaviour
     public TextAsset ResultsFile;
 
     public List<UnityEngine.Mesh> Meshes;
-    public List<TestResult> Results;
+    public List<TestResult> Results { get; set; }
 
     [HideInInspector]
     public int ResultIndex;

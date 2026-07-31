@@ -3,11 +3,11 @@
   "category": "VoxelisX",
   "description": "Unity's C# stateless physics library.\n\nBuilt on top of the Unity C# ECS framework, Unity Physics is network-ready, completely customizable, and built for performance out of the box. Whether you're building the next mobile hit or a new networked multiplayer console experience, Unity Physics leverages the Burst compiler and Job system to scale across a range of hardware.",
   "dependencies": {
-    "com.unity.burst": "1.8.25",
-    "com.unity.collections": "2.6.3",
-    "com.unity.entities": "1.4.3",
+    "com.unity.burst": "1.8.26",
+    "com.unity.collections": "6.5.0",
     "com.unity.mathematics": "1.3.2",
-    "com.unity.test-framework": "1.4.6",
+    "com.unity.entities": "6.5.0",
+    "com.unity.test-framework": "1.6.0",
     "com.unity.modules.imgui": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0"
   },
@@ -16,18 +16,24 @@
     "physics"
   ],
   "name": "voxelis.unity.physics",
-  "unity": "2022.3",
-  "unityRelease": "20f1",
-  "version": "1.4.3",
+  "unity": "6000.5",
+  "unityRelease": "0a2",
+  "version": "6.5.0",
   "samples": [
     {
       "displayName": "Custom Physics Authoring",
-      "description": "Provides a custom authoring experience for creating rigid bodies and colliders for Unity Physics.",
+      "description": "Provides a custom authoring experience for creating rigid bodies, colliders and joints for Unity Physics.",
       "importPath": "Authoring",
       "path": "Samples~/CustomPhysicsAuthoring"
+    },
+    {
+      "displayName": "Advanced Game Physics Sample - Chain and Gears",
+      "description": "Example of an advanced physics-based game element that leverages Unity Physics' Direct Solver to simulate a complex mechanism involving gears interacting with a chain. \n\nNotice: This sample has a dependency on Entities Graphics for the scene to render. \n\nThe simulation combines the Direct Solver for accurate simulation of the stiff chain links and the gears with the Iterative Solver for efficient simulation of all the collisions in the scene. This sample demonstrates how both solvers combined can capture exciting emerging physical behaviors at real-time simulation rates, such as the jamming of the gears caused by the chain getting stuck between the gears' teeth.",
+      "path": "Samples~/AdvancedGamePhysics-ChainAndGears",
+      "dependencies": [
+        "com.unity.physics/Samples~/Common"
+      ]
     }
   ],
-  "_upm": {
-    "changelog": "### Added\n\n* The Force Unique Collider companion component can now be disabled in the Inspector. When disabled it will no longer cause its associated baked Unity Physics Colliders to be unique.\n\n### Changed\n\n* Updated the Burst dependency to version 1.8.25\n\n### Deprecated\n\n\n### Removed\n\n\n### Fixed\n\n* Baked Unity Physics Colliders that are forced to be unique will now produce stable collider blob hashes. This ensures that associated artifact IDs in your project will no longer change each time the project is re-imported. Note that baked colliders can be forced to be unique either via the \"Force Unique\" option in the custom Physics Shape authoring component, or via the Force Unique Collider companion component for built-in Colliders. Both approaches now support stable collider blob hashes.\n\n### Security"
-  }
+  "_fingerprint": "b40494739ae23831d2dc5a1caeadde83a369b35b"
 }

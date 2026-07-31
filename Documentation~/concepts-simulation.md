@@ -15,7 +15,16 @@ In the Physics World Building stage, both these parts are constructed.
     * material restitution (bounciness)
     * points of contact
 
-    The constraint solver proceeds to iteratively correct the interpenetrations of all dynamically controlled colliders (dynamic rigid bodies) by applying contact impulses for the identified contact points. It performs similar corrections for joints, correspondingly restricting the motion of any jointed dynamic rigid body. This stage produces new linear and angular velocities for the affected rigid bodies.
+    The constraint solver proceeds to correct the interpenetrations of all dynamically controlled colliders (dynamic rigid bodies) by applying contact impulses for the identified contact points. It performs similar corrections for joints, correspondingly restricting the motion of any jointed dynamic rigid body. This stage produces new linear and angular velocities for the affected rigid bodies.
+    
+    There are two types of constraint solvers to chose from: an **Iterative Solver**, and a **Direct Solver**. Both have unique advantages and disadvantages and thus are best-suited for creating different types of physically-based game mechanics.
+
+    * The **Iterative Solver** is ideal for simulating massive numbers of colliding rigid bodies quickly and approximately.
+    * The **Direct Solver** is the best choice for accurately simulating long joint chains, stiff joints, large mass ratios or frictional contacts, but it comes with a performance cost.<br/>
+    ![](images/direct-solver-stable-stacking.gif)<br/>_Direct Solver in Unity Physics: Challenging scenario with stable stacking and large mass ratios. The Direct Solver produces high fidelity collisions with accurate friction and without the stability issues that would be observed in the same simulation with the Iterative Solver._
+
+
+    Since in Unity Physics both solvers can be combined in a single scene by assigning them to different joints and colliders, it is always possible to choose the best tool for the job. This lets you create game physics effects that would not be possible by using either an iterative or a direct solver alone. For more details please refer to the [Constraint Solver](constraint-solvers.md) section.
 6. __Integration:__ The physics system integrates all dynamic bodies forward in time by moving the dynamic rigid bodies according to their newly calculated linear and angular velocities and the current time step, creating new positions and orientations.
 7. __Export:__ Finally, the physics system applies each rigid body's new position and orientation to the Entity that represents that rigid body.
 

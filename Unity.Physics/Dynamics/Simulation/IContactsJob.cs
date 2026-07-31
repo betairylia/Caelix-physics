@@ -28,7 +28,6 @@ namespace Unity.Physics
         void Execute(ref ModifiableContactHeader header, ref ModifiableContactPoint contact);
     }
 
-#if !HAVOK_PHYSICS_EXISTS
 
     /// <summary>
     /// Interface for jobs that iterate through the list of contact manifolds produced by the narrow
@@ -38,7 +37,6 @@ namespace Unity.Physics
     {
     }
 
-#endif
 
     /// <summary>   A modifiable contact header. </summary>
     public struct ModifiableContactHeader
@@ -195,18 +193,16 @@ namespace Unity.Physics
     /// <summary>   The contacts job extensions. </summary>
     public static class IContactsJobExtensions
     {
-#if !HAVOK_PHYSICS_EXISTS
-
-        /// <summary>   Default Schedule() implementation for IContactsJob. </summary>
+        /// <summary>   Schedules an IContactsJob for serial processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
+        public static JobHandle Schedule<T>(this T job, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IContactsJobBase
         {
             // Should work only for UnityPhysics
@@ -215,54 +211,46 @@ namespace Unity.Physics
                 return inputDeps;
             }
 
-            return ScheduleUnityPhysicsContactsJob(jobData, simulationSingleton.AsSimulation(), ref world, inputDeps);
+            return ScheduleUnityPhysicsContactsJob(job, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-#else
-
-        /// <summary>
-        /// In this case Schedule() implementation for IContactsJob is provided by the Havok.Physics
-        /// assembly.
-        ///  This is a stub to catch when that assembly is missing.
-        /// <todo.eoin.modifier Put in a link to documentation for this:
-        /// </summary>
+        /// <summary>   Schedules an IContactsJob for parallel processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
+        /// <param name="innerLoopBatchCount">  Granularity in which workstealing is performed. A value of N, means the
+        ///                                     job queue will combine N job executions and perform them in an efficient
+        ///                                     inner loop.</param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
-        /// <param name="_causeCompileError">   (Optional) The cause compile error. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        [Obsolete("This error occurs when HAVOK_PHYSICS_EXISTS is defined but Havok.Physics is missing from your package's asmdef references. (DoNotRemove)", true)]
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps,
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF _causeCompileError = HAVOK_PHYSICS_MISSING_FROM_ASMDEF.HAVOK_PHYSICS_MISSING_FROM_ASMDEF)
+        public static JobHandle ScheduleParallel<T>(this T job, int innerLoopBatchCount, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IContactsJobBase
         {
-            return new JobHandle();
+            // Should work only for UnityPhysics
+            if (simulationSingleton.Type != SimulationType.UnityPhysics)
+            {
+                return inputDeps;
+            }
+
+            return ScheduleParallelUnityPhysicsContactsJob(job, innerLoopBatchCount, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-        /// <summary>   Values that represent havok physics missing from asmdefs. </summary>
-        public enum HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        {
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        }
-#endif
-
-        internal static unsafe JobHandle ScheduleUnityPhysicsContactsJob<T>(this T jobData, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+        static unsafe JobHandle ScheduleUnityPhysicsContactsJob<T>(this T job, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IContactsJobBase
         {
             SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateContacts);
 
-            if (simulation.StepContext.Contacts.IsCreated && simulation.StepContext.SolverSchedulerInfo.NumWorkItems.IsCreated)
+            if (simulation.StepContext.Contacts.IsCreated)
             {
                 var data = new ContactsJobData<T>
                 {
-                    UserJobData = jobData,
+                    UserJobData = job,
                     ContactReader = simulation.StepContext.Contacts.AsReader(),
-                    NumWorkItems = simulation.StepContext.SolverSchedulerInfo.NumWorkItems,
-                    Bodies = world.Bodies
+                    Bodies = world.Bodies,
+                    IsParallel = false
                 };
 
                 var reflectionData = ContactsJobProcess<T>.jobReflectionData.Data;
@@ -275,14 +263,42 @@ namespace Unity.Physics
             return inputDeps;
         }
 
-        internal unsafe struct ContactsJobData<T> where T : struct
+        static unsafe JobHandle ScheduleParallelUnityPhysicsContactsJob<T>(this T job, int innerLoopBatchCount, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+            where T : struct, IContactsJobBase
+        {
+            SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateContacts);
+
+            if (simulation.StepContext.Contacts.IsCreated)
+            {
+                var contactsStream = simulation.StepContext.Contacts;
+                var data = new ContactsJobData<T>
+                {
+                    UserJobData = job,
+                    ContactReader = contactsStream.AsReader(),
+                    Bodies = world.Bodies,
+                    IsParallel = true
+                };
+
+                var reflectionData = ContactsJobProcess<T>.jobReflectionData.Data;
+                ContactsJobProcess<T>.CheckReflectionDataCorrect(reflectionData);
+
+                var parameters = new JobsUtility.JobScheduleParameters(UnsafeUtility.AddressOf(ref data), reflectionData, inputDeps, ScheduleMode.Parallel);
+                var forEachCountPtr = NativeStreamUnsafeUtility.GetUnsafeForEachCountPtr(ref contactsStream);
+                var listDataPtr = (byte*)forEachCountPtr - sizeof(void*);
+                return JobsUtility.ScheduleParallelForDeferArraySize(ref parameters, innerLoopBatchCount, listDataPtr, null);
+            }
+
+            return inputDeps;
+        }
+
+        internal struct ContactsJobData<T> where T : struct
         {
             public T UserJobData;
 
             [NativeDisableContainerSafetyRestriction] public NativeStream.Reader ContactReader;
-            [ReadOnly] public NativeArray<int> NumWorkItems;
             // Disable aliasing restriction in case T has a NativeArray of PhysicsWorld.Bodies
             [ReadOnly, NativeDisableContainerSafetyRestriction] public NativeArray<RigidBody> Bodies;
+            public bool IsParallel;
         }
 
         internal struct ContactsJobProcess<T> where T : struct, IContactsJobBase
@@ -302,39 +318,59 @@ namespace Unity.Physics
             public unsafe static void Execute(ref ContactsJobData<T> jobData, IntPtr additionalData,
                 IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
             {
-                var iterator = new ContactsJobIterator(jobData.ContactReader, jobData.NumWorkItems[0]);
-
-                while (iterator.HasItemsLeft())
+                while (true)
                 {
-                    iterator.Next();
+                    int forEachIndexBegin = 0;
+                    int forEachIndexEnd = jobData.ContactReader.ForEachCount;
 
-                    //<todo.eoin.modifier Could store the pointer, to avoid copies, like the jacobian job?
-                    var header = new ModifiableContactHeader
+                    if (jobData.IsParallel)
                     {
-                        ContactHeader = *iterator.m_LastHeader,
-                        EntityPair = new EntityPair
+                        if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out forEachIndexBegin, out forEachIndexEnd))
+                            break;
+
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                        JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobData), forEachIndexBegin, forEachIndexEnd - forEachIndexBegin);
+#endif
+                    }
+
+                    var iterator = new ContactsJobIterator(jobData.ContactReader, forEachIndexBegin, forEachIndexEnd);
+
+                    while (iterator.HasItemsLeft())
+                    {
+                        iterator.Next();
+
+                        //<todo.eoin.modifier Could store the pointer, to avoid copies, like the jacobian job?
+                        var header = new ModifiableContactHeader
                         {
-                            EntityA = jobData.Bodies[iterator.m_LastHeader->BodyPair.BodyIndexA].Entity,
-                            EntityB = jobData.Bodies[iterator.m_LastHeader->BodyPair.BodyIndexB].Entity
+                            ContactHeader = *iterator.m_LastHeader,
+                            EntityPair = new EntityPair
+                            {
+                                EntityA = jobData.Bodies[iterator.m_LastHeader->BodyPair.BodyIndexA].Entity,
+                                EntityB = jobData.Bodies[iterator.m_LastHeader->BodyPair.BodyIndexB].Entity
+                            }
+                        };
+                        var contact = new ModifiableContactPoint
+                        {
+                            ContactPoint = *iterator.m_LastContact,
+                            Index = iterator.CurrentPointIndex
+                        };
+
+                        jobData.UserJobData.Execute(ref header, ref contact);
+
+                        if (header.Modified)
+                        {
+                            *iterator.m_LastHeader = header.ContactHeader;
                         }
-                    };
-                    var contact = new ModifiableContactPoint
-                    {
-                        ContactPoint = *iterator.m_LastContact,
-                        Index = iterator.CurrentPointIndex
-                    };
 
-                    jobData.UserJobData.Execute(ref header, ref contact);
-
-                    if (header.Modified)
-                    {
-                        *iterator.m_LastHeader = header.ContactHeader;
+                        if (contact.Modified)
+                        {
+                            *iterator.m_LastContact = contact.ContactPoint;
+                        }
                     }
 
-                    if (contact.Modified)
-                    {
-                        *iterator.m_LastContact = contact.ContactPoint;
-                    }
+                    // If we are not running in parallel, we are done.
+                    if (!jobData.IsParallel)
+                        break;
                 }
             }
 
@@ -356,24 +392,31 @@ namespace Unity.Physics
         }
 
         // Utility to help iterate over all the items in the contacts job stream
-        private unsafe struct ContactsJobIterator
+        unsafe struct ContactsJobIterator
         {
             [NativeDisableContainerSafetyRestriction] NativeStream.Reader m_ContactReader;
             [NativeDisableUnsafePtrRestriction] public ContactHeader* m_LastHeader;
             [NativeDisableUnsafePtrRestriction] public ContactPoint* m_LastContact;
             int m_NumPointsLeft;
-            int m_CurrentWorkItem;
-            readonly int m_MaxNumWorkItems;
+            int m_CurrentForEachIndex;
+            int m_ForEachIndexEnd;
 
-            public unsafe ContactsJobIterator(NativeStream.Reader reader, int numWorkItems)
+            public ContactsJobIterator(NativeStream.Reader reader, int forEachIndexBegin, int forEachIndexEnd)
             {
-                m_ContactReader = reader;
-                m_MaxNumWorkItems = numWorkItems;
+                SafetyChecks.CheckAreEqualAndThrow(true, forEachIndexBegin >= 0
+                    && forEachIndexBegin <= forEachIndexEnd // Note: we use <= here since for empty readers,
+                                                            // forEachIndexEnd will be identical to forEachIndexBegin,
+                                                            // both being zero. This is still valid, and should not throw.
+                    && forEachIndexEnd <= reader.ForEachCount);
 
-                m_CurrentWorkItem = 0;
+                m_ContactReader = reader;
+
+                m_CurrentForEachIndex = forEachIndexBegin;
+                m_ForEachIndexEnd = forEachIndexEnd;
                 m_NumPointsLeft = 0;
                 m_LastHeader = null;
                 m_LastContact = null;
+
                 AdvanceForEachIndex();
             }
 
@@ -382,7 +425,7 @@ namespace Unity.Physics
                 return m_ContactReader.RemainingItemCount > 0;
             }
 
-            public unsafe int CurrentPointIndex => m_LastHeader->NumContacts - m_NumPointsLeft - 1;
+            public int CurrentPointIndex => m_LastHeader->NumContacts - m_NumPointsLeft - 1;
 
             public void Next()
             {
@@ -404,10 +447,9 @@ namespace Unity.Physics
 
             void AdvanceForEachIndex()
             {
-                while (m_ContactReader.RemainingItemCount == 0 && m_CurrentWorkItem < m_MaxNumWorkItems)
+                while (m_ContactReader.RemainingItemCount == 0 && m_CurrentForEachIndex < m_ForEachIndexEnd)
                 {
-                    m_ContactReader.BeginForEachIndex(m_CurrentWorkItem);
-                    m_CurrentWorkItem++;
+                    m_ContactReader.BeginForEachIndex(m_CurrentForEachIndex++);
                 }
             }
         }

@@ -1,5 +1,6 @@
 using System;
 using Unity.Burst;
+using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel.Unsafe;
@@ -16,26 +17,23 @@ namespace Unity.Physics
         void Execute(ImpulseEvent impulseEvent);
     }
 
-#if !HAVOK_PHYSICS_EXISTS
     /// <summary>   Interface for impulse events job. </summary>
     public interface IImpulseEventsJob : IImpulseEventsJobBase
     {
     }
-#endif
 
     /// <summary>   An extension class for scheduling ImpulseEventsJob. </summary>
     public static class IImpulseEventJobExtensions
     {
-#if !HAVOK_PHYSICS_EXISTS
-        /// <summary>   Default Schedule() implementation for IImpulseEventJob. </summary>
+        /// <summary>   Schedules an IImpulseEventsJob for serial processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="inputDeps">            The input deps. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, JobHandle inputDeps)
+        public static JobHandle Schedule<T>(this T job, SimulationSingleton simulationSingleton, JobHandle inputDeps)
             where T : struct, IImpulseEventsJobBase
         {
             // Should work only for UnityPhysics
@@ -43,37 +41,32 @@ namespace Unity.Physics
             {
                 return inputDeps;
             }
-            return ScheduleUnityPhysicsImpulseEventsJob(jobData, simulationSingleton.AsSimulation(), inputDeps);
+            return ScheduleUnityPhysicsImpulseEventsJob(job, simulationSingleton.AsSimulation(), inputDeps);
         }
 
-#else
-        /// <summary>
-        /// In this case Schedule() implementation for IImpulseEventsJob is provided by the Havok.Physics
-        /// assembly. This is a stub to catch when that assembly is missing.
-        /// </summary>
+        /// <summary>   Schedules an IImpulseEventsJob for parallel processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
-        /// <param name="simulation">           The simulation. </param>
-        /// <param name="inputDeps">            The input deps. </param>
-        /// <param name="_causeCompileError">   (Optional) The cause compile error. </param>
+        /// <param name="job">      The scheduled job. </param>
+        /// <param name="innerLoopBatchCount">  Granularity in which workstealing is performed. A value of N, means the
+        ///                                     job queue will combine N job executions and perform them in an efficient
+        ///                                     inner loop.</param>
+        /// <param name="simulationSingleton">  The simulation singleton. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        [Obsolete("This error occurs when HAVOK_PHYSICS_EXISTS is defined but Havok.Physics is missing from your package's asmdef references. (DoNotRemove)", true)]
-        public static unsafe JobHandle Schedule<T>(this T jobData, ISimulation simulation, JobHandle inputDeps,
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF _causeCompileError = HAVOK_PHYSICS_MISSING_FROM_ASMDEF.HAVOK_PHYSICS_MISSING_FROM_ASMDEF)
+        public static JobHandle ScheduleParallel<T>(this T job, int innerLoopBatchCount, SimulationSingleton simulationSingleton, JobHandle inputDeps)
             where T : struct, IImpulseEventsJobBase
         {
-            return new JobHandle();
+            // Should work only for UnityPhysics
+            if (simulationSingleton.Type != SimulationType.UnityPhysics)
+            {
+                return inputDeps;
+            }
+            return ScheduleParallelUnityPhysicsImpulseEventsJob(job, innerLoopBatchCount, simulationSingleton.AsSimulation(), inputDeps);
         }
 
-        /// <summary>   Values that represent havok physics missing from asmdefs. </summary>
-        public enum HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        {
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        }
-#endif
-        internal static unsafe JobHandle ScheduleUnityPhysicsImpulseEventsJob<T>(T jobData, Simulation simulation, JobHandle inputDeps)
+        static unsafe JobHandle ScheduleUnityPhysicsImpulseEventsJob<T>(T job, Simulation simulation, JobHandle inputDeps)
             where T : struct, IImpulseEventsJobBase
         {
             SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.Idle);
@@ -82,8 +75,9 @@ namespace Unity.Physics
 
             var data = new ImpulseEventJobData<T>
             {
-                UserJobData = jobData,
-                EventReader = simulation.ImpulseEvents
+                UserJobData = job,
+                EventReader = simulation.ImpulseEvents.EventDataStream.AsReader(),
+                IsParallel = false
             };
 
             var jobReflectionData = ImpulseEventJobProcess<T>.jobReflectionData.Data;
@@ -93,10 +87,35 @@ namespace Unity.Physics
             return JobsUtility.Schedule(ref parameters);
         }
 
-        internal unsafe struct ImpulseEventJobData<T> where T : struct
+        static unsafe JobHandle ScheduleParallelUnityPhysicsImpulseEventsJob<T>(T jobData, int innerLoopBatchCount, Simulation simulation, JobHandle inputDeps)
+            where T : struct, IImpulseEventsJobBase
+        {
+            SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.Idle);
+            if (!simulation.ReadyForEventScheduling)
+                return inputDeps;
+
+            var eventDataStream = simulation.ImpulseEvents.EventDataStream;
+            var data = new ImpulseEventJobData<T>
+            {
+                UserJobData = jobData,
+                EventReader = eventDataStream.AsReader(),
+                IsParallel = true
+            };
+
+            var jobReflectionData = ImpulseEventJobProcess<T>.jobReflectionData.Data;
+            ImpulseEventJobProcess<T>.CheckReflectionDataCorrect(jobReflectionData);
+
+            var parameters = new JobsUtility.JobScheduleParameters(UnsafeUtility.AddressOf(ref data), jobReflectionData, inputDeps, ScheduleMode.Parallel);
+            var forEachCountPtr = NativeStreamUnsafeUtility.GetUnsafeForEachCountPtr(ref eventDataStream);
+            var listDataPtr = (byte*)forEachCountPtr - sizeof(void*);
+            return JobsUtility.ScheduleParallelForDeferArraySize(ref parameters, innerLoopBatchCount, listDataPtr, null);
+        }
+
+        internal struct ImpulseEventJobData<T> where T : struct
         {
             public T UserJobData;
-            [NativeDisableContainerSafetyRestriction] public ImpulseEvents EventReader;
+            [NativeDisableContainerSafetyRestriction] public NativeStream.Reader EventReader;
+            public bool IsParallel;
         }
 
         internal struct ImpulseEventJobProcess<T> where T : struct, IImpulseEventsJobBase
@@ -123,9 +142,33 @@ namespace Unity.Physics
             public unsafe static void Execute(ref ImpulseEventJobData<T> jobData, IntPtr additionalData,
                 IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
             {
-                foreach (ImpulseEvent impulseEvent in jobData.EventReader)
+                while (true)
                 {
-                    jobData.UserJobData.Execute(impulseEvent);
+                    int forEachIndexBegin = 0;
+                    int forEachIndexEnd = jobData.EventReader.ForEachCount;
+
+                    if (jobData.IsParallel)
+                    {
+                        if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out forEachIndexBegin,
+                                out forEachIndexEnd))
+                            break;
+
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                        JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobData),
+                            forEachIndexBegin, forEachIndexEnd - forEachIndexBegin);
+#endif
+                    }
+
+                    var eventEnumerator = new ImpulseEvents.Enumerator(jobData.EventReader, forEachIndexBegin, forEachIndexEnd);
+
+                    while (eventEnumerator.MoveNext())
+                    {
+                        jobData.UserJobData.Execute(eventEnumerator.Current);
+                    }
+
+                    // If we are not running in parallel, we are done.
+                    if (!jobData.IsParallel)
+                        break;
                 }
             }
         }

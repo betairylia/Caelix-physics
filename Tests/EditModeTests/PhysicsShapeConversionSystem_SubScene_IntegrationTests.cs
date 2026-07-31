@@ -179,14 +179,14 @@ namespace Unity.Physics.Tests.Authoring
                 SubSceneUtility.EditScene(SubSceneManaged);
 
                 expectedBoxes.InsertRange(0,
-                    Object.FindObjectsByType<UnityEngine.BoxCollider>(FindObjectsSortMode.None));
+                    Object.FindObjectsByType<UnityEngine.BoxCollider>());
 
                 yield return UpdateEditorAndWorld();
 
                 ValidateExpectedBoxCompoundCollider(expectedBoxes);
 
                 // make a modification to each colliders' transform to trigger incremental compound collider re-baking and validate again
-                var boxColliders = Object.FindObjectsByType<UnityEngine.BoxCollider>(FindObjectsSortMode.None);
+                var boxColliders = Object.FindObjectsByType<UnityEngine.BoxCollider>();
                 Assert.That(boxColliders.Length, Is.EqualTo(expectedBoxes.Count));
                 foreach (var box in boxColliders)
                 {

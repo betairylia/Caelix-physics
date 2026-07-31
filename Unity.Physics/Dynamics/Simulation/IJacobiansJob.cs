@@ -33,7 +33,6 @@ namespace Unity.Physics
         void Execute(ref ModifiableJacobianHeader header, ref ModifiableTriggerJacobian jacobian);
     }
 
-#if !HAVOK_PHYSICS_EXISTS
 
     /// <summary>
     /// Interface for jobs that iterate through the list of Jacobians before they are solved.
@@ -42,7 +41,6 @@ namespace Unity.Physics
     {
     }
 
-#endif
 
     /// <summary>   A modifiable jacobian header. </summary>
     public unsafe struct ModifiableJacobianHeader
@@ -270,18 +268,16 @@ namespace Unity.Physics
     /// <summary>   The jacobians job extensions. </summary>
     public static class IJacobiansJobExtensions
     {
-#if !HAVOK_PHYSICS_EXISTS
-
-        /// <summary>   Default Schedule() implementation for IJacobiansJob. </summary>
+        /// <summary>   Schedules an IJacobiansJob for serial processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
+        public static JobHandle Schedule<T>(this T job, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IJacobiansJobBase
         {
             // Should work only for UnityPhysics
@@ -290,54 +286,47 @@ namespace Unity.Physics
                 return inputDeps;
             }
 
-            return ScheduleUnityPhysicsJacobiansJob(jobData, simulationSingleton.AsSimulation(), ref world, inputDeps);
+            return ScheduleUnityPhysicsJacobiansJob(job, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-#else
 
-        /// <summary>
-        /// In this case Schedule() implementation for IJacobiansJob is provided by the Havok.Physics
-        /// assembly.
-        ///  This is a stub to catch when that assembly is missing.
-        /// <todo.eoin.modifier Put in a link to documentation for this:
-        /// </summary>
+        /// <summary>   Schedules an IJacobiansJob for parallel processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
+        /// <param name="innerLoopBatchCount">  Granularity in which workstealing is performed. A value of N, means the
+        ///                                     job queue will combine N job executions and perform them in an efficient
+        ///                                     inner loop.</param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
-        /// <param name="_causeCompileError">   (Optional) The cause compile error. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        [Obsolete("This error occurs when HAVOK_PHYSICS_EXISTS is defined but Havok.Physics is missing from your package's asmdef references. (DoNotRemove)", true)]
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps,
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF _causeCompileError = HAVOK_PHYSICS_MISSING_FROM_ASMDEF.HAVOK_PHYSICS_MISSING_FROM_ASMDEF)
+        public static JobHandle ScheduleParallel<T>(this T job, int innerLoopBatchCount, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IJacobiansJobBase
         {
-            return new JobHandle();
+            // Should work only for UnityPhysics
+            if (simulationSingleton.Type != SimulationType.UnityPhysics)
+            {
+                return inputDeps;
+            }
+
+            return ScheduleParallelUnityPhysicsJacobiansJob(job, innerLoopBatchCount, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-        /// <summary>   Values that represent havok physics missing from asmdefs. </summary>
-        public enum HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        {
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        }
-#endif
-
-        internal static unsafe JobHandle ScheduleUnityPhysicsJacobiansJob<T>(T jobData, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+        static unsafe JobHandle ScheduleUnityPhysicsJacobiansJob<T>(T job, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IJacobiansJobBase
         {
             SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateJacobians);
 
-            if (simulation.StepContext.Jacobians.IsCreated && simulation.StepContext.SolverSchedulerInfo.NumWorkItems.IsCreated)
+            if (simulation.StepContext.Jacobians.IsCreated)
             {
                 var data = new JacobiansJobData<T>
                 {
-                    UserJobData = jobData,
-                    StreamReader = simulation.StepContext.Jacobians.AsReader(),
-                    NumWorkItems = simulation.StepContext.SolverSchedulerInfo.NumWorkItems,
-                    Bodies = world.Bodies
+                    UserJobData = job,
+                    JacobiansReader = simulation.StepContext.Jacobians.AsReader(),
+                    Bodies = world.Bodies,
+                    IsParallel = false
                 };
 
                 var jobReflectionData = JacobiansJobProcess<T>.jobReflectionData.Data;
@@ -351,19 +340,69 @@ namespace Unity.Physics
             return inputDeps;
         }
 
-        internal unsafe struct JacobiansJobData<T> where T : struct
+        static unsafe JobHandle ScheduleParallelUnityPhysicsJacobiansJob<T>(T job, int innerLoopBatchCount, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+            where T : struct, IJacobiansJobBase
+        {
+            SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateJacobians);
+
+            if (simulation.StepContext.Jacobians.IsCreated)
+            {
+                var jacobiansStream = simulation.StepContext.Jacobians;
+                var data = new JacobiansJobData<T>
+                {
+                    UserJobData = job,
+                    JacobiansReader = jacobiansStream.AsReader(),
+                    Bodies = world.Bodies,
+                    IsParallel = true
+                };
+
+                var jobReflectionData = JacobiansJobProcess<T>.jobReflectionData.Data;
+                JacobiansJobProcess<T>.CheckReflectionDataCorrect(jobReflectionData);
+
+                var parameters = new JobsUtility.JobScheduleParameters(UnsafeUtility.AddressOf(ref data), jobReflectionData, inputDeps, ScheduleMode.Parallel);
+                var forEachCountPtr = NativeStreamUnsafeUtility.GetUnsafeForEachCountPtr(ref jacobiansStream);
+                var listDataPtr = (byte*)forEachCountPtr - sizeof(void*);
+                return JobsUtility.ScheduleParallelForDeferArraySize(ref parameters, innerLoopBatchCount, listDataPtr, null);
+            }
+            // else:
+
+            return inputDeps;
+        }
+
+        internal struct JacobiansJobData<T> where T : struct
         {
             public T UserJobData;
-            public NativeStream.Reader StreamReader;
-
-            [ReadOnly] public NativeArray<int> NumWorkItems;
+            public NativeStream.Reader JacobiansReader;
 
             // Disable aliasing restriction in case T has a NativeArray of PhysicsWorld.Bodies
-            [ReadOnly, NativeDisableContainerSafetyRestriction] public NativeArray<RigidBody> Bodies;
+            [ReadOnly, NativeDisableContainerSafetyRestriction]
+            public NativeArray<RigidBody> Bodies;
+            public bool IsParallel;
+        }
 
-            int m_CurrentWorkItem;
+        // Utility to help iterate over all the items in the jacobians job stream
+        unsafe struct JacobiansJobIterator
+        {
+            NativeStream.Reader m_JacobiansReader;
+            int m_CurrentForEachIndex;
+            int m_ForEachIndexEnd;
 
-            public bool HasItemsLeft => StreamReader.RemainingItemCount > 0;
+            public JacobiansJobIterator(NativeStream.Reader reader, int forEachIndexBegin, int forEachIndexEnd)
+            {
+                SafetyChecks.CheckAreEqualAndThrow(true, forEachIndexBegin >= 0
+                    && forEachIndexBegin <= forEachIndexEnd // Note: we use <= here since for empty readers,
+                                                            // forEachIndexEnd will be identical to forEachIndexBegin,
+                                                            // both being zero. This is still valid, and should not throw.
+                    && forEachIndexEnd <= reader.ForEachCount);
+
+                m_JacobiansReader = reader;
+                m_CurrentForEachIndex = forEachIndexBegin;
+                m_ForEachIndexEnd = forEachIndexEnd;
+
+                MoveReaderToNextForEachIndex();
+            }
+
+            public bool HasItemsLeft => m_JacobiansReader.RemainingItemCount > 0;
 
             public JacobianHeader* ReadJacobianHeader()
             {
@@ -371,26 +410,24 @@ namespace Unity.Physics
                 return (JacobianHeader*)Read(readSize);
             }
 
-            private byte* Read(int size)
+            byte* Read(int size)
             {
-                byte* dataPtr = StreamReader.ReadUnsafePtr(size);
+                byte* dataPtr = m_JacobiansReader.ReadUnsafePtr(size);
                 MoveReaderToNextForEachIndex();
                 return dataPtr;
             }
 
-            private ref T2 Read<T2>() where T2 : struct
+            ref T2 Read<T2>() where T2 : struct
             {
                 int size = UnsafeUtility.SizeOf<T2>();
                 return ref UnsafeUtility.AsRef<T2>(Read(size));
             }
 
-            public void MoveReaderToNextForEachIndex()
+            void MoveReaderToNextForEachIndex()
             {
-                int numWorkItems = NumWorkItems[0];
-                while (StreamReader.RemainingItemCount == 0 && m_CurrentWorkItem < numWorkItems)
+                while (m_JacobiansReader.RemainingItemCount == 0 && m_CurrentForEachIndex < m_ForEachIndexEnd)
                 {
-                    StreamReader.BeginForEachIndex(m_CurrentWorkItem);
-                    m_CurrentWorkItem++;
+                    m_JacobiansReader.BeginForEachIndex(m_CurrentForEachIndex++);
                 }
             }
         }
@@ -419,37 +456,64 @@ namespace Unity.Physics
             public unsafe static void Execute(ref JacobiansJobData<T> jobData, IntPtr additionalData,
                 IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
             {
-                jobData.MoveReaderToNextForEachIndex();
-                while (jobData.HasItemsLeft)
+                while (true)
                 {
-                    JacobianHeader* header = jobData.ReadJacobianHeader();
+                    int forEachIndexBegin = 0;
+                    int forEachIndexEnd = jobData.JacobiansReader.ForEachCount;
 
-                    var h = new ModifiableJacobianHeader
+                    if (jobData.IsParallel)
                     {
-                        m_Header = header,
-                        EntityPair = new EntityPair
+                        if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out forEachIndexBegin,
+                                out forEachIndexEnd))
+                            break;
+
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                        JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobData),
+                            forEachIndexBegin, forEachIndexEnd - forEachIndexBegin);
+#endif
+                    }
+
+                    var iterator = new JacobiansJobIterator(jobData.JacobiansReader, forEachIndexBegin, forEachIndexEnd);
+
+                    while (iterator.HasItemsLeft)
+                    {
+                        JacobianHeader* header = iterator.ReadJacobianHeader();
+
+                        var h = new ModifiableJacobianHeader
                         {
-                            EntityA = jobData.Bodies[header->BodyPair.BodyIndexA].Entity,
-                            EntityB = jobData.Bodies[header->BodyPair.BodyIndexB].Entity
+                            m_Header = header,
+                            EntityPair = new EntityPair
+                            {
+                                EntityA = jobData.Bodies[header->BodyPair.BodyIndexA].Entity,
+                                EntityB = jobData.Bodies[header->BodyPair.BodyIndexB].Entity
+                            }
+                        };
+                        if (header->Type == JacobianType.Contact)
+                        {
+                            var contact = new ModifiableContactJacobian
+                            {
+                                m_ContactJacobian =
+                                    (ContactJacobian*)UnsafeUtility.AddressOf(
+                                        ref header->AccessBaseJacobian<ContactJacobian>())
+                            };
+                            jobData.UserJobData.Execute(ref h, ref contact);
                         }
-                    };
-                    if (header->Type == JacobianType.Contact)
-                    {
-                        var contact = new ModifiableContactJacobian
+                        else if (header->Type == JacobianType.Trigger)
                         {
-                            m_ContactJacobian = (ContactJacobian*)UnsafeUtility.AddressOf(ref header->AccessBaseJacobian<ContactJacobian>())
-                        };
-                        jobData.UserJobData.Execute(ref h, ref contact);
-                    }
-                    else if (header->Type == JacobianType.Trigger)
-                    {
-                        var trigger = new ModifiableTriggerJacobian
-                        {
-                            m_TriggerJacobian = (TriggerJacobian*)UnsafeUtility.AddressOf(ref header->AccessBaseJacobian<TriggerJacobian>())
-                        };
+                            var trigger = new ModifiableTriggerJacobian
+                            {
+                                m_TriggerJacobian =
+                                    (TriggerJacobian*)UnsafeUtility.AddressOf(
+                                        ref header->AccessBaseJacobian<TriggerJacobian>())
+                            };
 
-                        jobData.UserJobData.Execute(ref h, ref trigger);
+                            jobData.UserJobData.Execute(ref h, ref trigger);
+                        }
                     }
+
+                    // If we are not running in parallel, we are done.
+                    if (!jobData.IsParallel)
+                        break;
                 }
             }
         }

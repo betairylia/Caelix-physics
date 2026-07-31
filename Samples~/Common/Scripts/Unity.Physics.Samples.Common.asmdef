@@ -1,0 +1,30 @@
+{
+    "name": "Unity.Physics.Samples.Common",
+    "references": [
+        "Unity.Burst",
+        "Unity.Collections",
+        "Unity.Entities",
+        "Unity.Entities.Graphics",
+        "Unity.Entities.Hybrid",
+        "Unity.InputSystem",
+        "Unity.Mathematics",
+        "Unity.Physics",
+        "Unity.Physics.Hybrid",
+        "Unity.Transforms",
+        "UnityEditor.UI",
+        "UnityEngine.UI"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+      {
+        "name": "com.unity.entities.graphics",
+        "expression": "6.5.0",
+        "define": "HAS_ENTITIES_GRAPHICS"
+      }
+    ]
+}
