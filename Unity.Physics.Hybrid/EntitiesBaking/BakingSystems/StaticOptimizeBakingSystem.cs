@@ -2,6 +2,7 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
+using UnityEngine;
 
 namespace Unity.Physics.Authoring
 {
@@ -22,7 +23,7 @@ namespace Unity.Physics.Authoring
     struct BakeStaticRoot : IComponentData
     {
         public Entity Body;
-        public int ConvertedBodyInstanceID;
+        public EntityId ConvertedBodyEntityId;
     }
 
     [BurstCompile]
@@ -98,7 +99,7 @@ namespace Unity.Physics.Authoring
                 systemState.EntityManager.SetComponentData(rootEntity, new PhysicsCompoundData()
                 {
                     AssociateBlobToBody = false,
-                    ConvertedBodyInstanceID = kv.Value.ConvertedBodyInstanceID,
+                    ConvertedBodyEntityId = kv.Value.ConvertedBodyEntityId,
                     Hash = default,
                 });
             }

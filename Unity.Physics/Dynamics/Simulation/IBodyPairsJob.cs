@@ -22,7 +22,6 @@ namespace Unity.Physics
         void Execute(ref ModifiableBodyPair pair);
     }
 
-#if !HAVOK_PHYSICS_EXISTS
 
     /// <summary>
     /// Interface for jobs that iterate through the list of potentially overlapping body pairs
@@ -31,8 +30,6 @@ namespace Unity.Physics
     public interface IBodyPairsJob : IBodyPairsJobBase
     {
     }
-
-#endif
 
     /// <summary>   A modifiable body pair. </summary>
     public struct ModifiableBodyPair
@@ -70,18 +67,16 @@ namespace Unity.Physics
     /// <summary>   A body pairs job extensions. </summary>
     public static class IBodyPairsJobExtensions
     {
-#if !HAVOK_PHYSICS_EXISTS
-
-        /// <summary>   Default Schedule() implementation for IBodyPairsJob. </summary>
+        /// <summary>   Schedules an IBodyPairsJob for serial processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
+        public static JobHandle Schedule<T>(this T job, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IBodyPairsJobBase
         {
             // Should work only for UnityPhysics
@@ -90,41 +85,34 @@ namespace Unity.Physics
                 return inputDeps;
             }
 
-            return ScheduleUnityPhysicsBodyPairsJob(jobData, simulationSingleton.AsSimulation(), ref world, inputDeps);
+            return ScheduleUnityPhysicsBodyPairsJob(job, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-#else
-
-        /// <summary>
-        /// In this case Schedule() implementation for IBodyPairsJob is provided by the Havok.Physics
-        /// assembly.
-        /// This is a stub to catch when that assembly is missing.
-        /// </summary>
+        /// <summary>   Schedules an IBodyPairsJob for parallel processing. </summary>
         ///
         /// <typeparam name="T">    Generic type parameter. </typeparam>
-        /// <param name="jobData">              The jobData to act on. </param>
+        /// <param name="job">      The scheduled job. </param>
+        /// <param name="innerLoopBatchCount">  Granularity in which workstealing is performed. A value of N, means the
+        ///                                     job queue will combine N job executions and perform them in an efficient
+        ///                                     inner loop.</param>
         /// <param name="simulationSingleton">  The simulation singleton. </param>
-        /// <param name="world">                [in,out] The world. </param>
-        /// <param name="inputDeps">            The input deps. </param>
-        /// <param name="_causeCompileError">   (Optional) The cause compile error. </param>
+        /// <param name="world">                [in,out] The physics world. </param>
+        /// <param name="inputDeps">            The input dependencies. </param>
         ///
         /// <returns>   A JobHandle. </returns>
-        [Obsolete("This error occurs when HAVOK_PHYSICS_EXISTS is defined but Havok.Physics is missing from your package's asmdef references. (DoNotRemove)", true)]
-        public static unsafe JobHandle Schedule<T>(this T jobData, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps,
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF _causeCompileError = HAVOK_PHYSICS_MISSING_FROM_ASMDEF.HAVOK_PHYSICS_MISSING_FROM_ASMDEF)
-            where T : struct, IBodyPairsJobBase
+        public static JobHandle ScheduleParallel<T>(this T job, int innerLoopBatchCount, SimulationSingleton simulationSingleton, ref PhysicsWorld world, JobHandle inputDeps)
+            where T : struct, IBodyPairsJob
         {
-            return new JobHandle();
+            // Should work only for UnityPhysics
+            if (simulationSingleton.Type != SimulationType.UnityPhysics)
+            {
+                return inputDeps;
+            }
+
+            return ScheduleParallelUnityPhysicsBodyPairsJob(job, innerLoopBatchCount, simulationSingleton.AsSimulation(), ref world, inputDeps);
         }
 
-        /// <summary>   Values that represent havok physics missing from asmdefs. </summary>
-        public enum HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        {
-            HAVOK_PHYSICS_MISSING_FROM_ASMDEF
-        }
-#endif
-
-        internal static unsafe JobHandle ScheduleUnityPhysicsBodyPairsJob<T>(T jobData, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+        static unsafe JobHandle ScheduleUnityPhysicsBodyPairsJob<T>(T job, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
             where T : struct, IBodyPairsJobBase
         {
             SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateBodyPairs);
@@ -133,9 +121,10 @@ namespace Unity.Physics
             {
                 var data = new BodyPairsJobData<T>
                 {
-                    UserJobData = jobData,
+                    UserJobData = job,
                     PhasedDispatchPairs = simulation.StepContext.PhasedDispatchPairs.AsDeferredJobArray(),
-                    Bodies = world.Bodies
+                    Bodies = world.Bodies,
+                    IsParallel = false
                 };
 
                 var jobReflectionData = BodyPairsJobProcess<T>.jobReflectionData.Data;
@@ -149,12 +138,39 @@ namespace Unity.Physics
             return inputDeps;
         }
 
+        static unsafe JobHandle ScheduleParallelUnityPhysicsBodyPairsJob<T>(this T job, int innerLoopBatchCount, Simulation simulation, ref PhysicsWorld world, JobHandle inputDeps)
+            where T : struct, IBodyPairsJobBase
+        {
+            SafetyChecks.CheckSimulationStageAndThrow(simulation.m_SimulationScheduleStage, SimulationScheduleStage.PostCreateBodyPairs);
+
+            if (simulation.StepContext.PhasedDispatchPairs.IsCreated)
+            {
+                var data = new BodyPairsJobData<T>
+                {
+                    UserJobData = job,
+                    PhasedDispatchPairs = simulation.StepContext.PhasedDispatchPairs.AsDeferredJobArray(),
+                    Bodies = world.Bodies,
+                    IsParallel = true
+                };
+
+                var jobReflectionData = BodyPairsJobProcess<T>.jobReflectionData.Data;
+                BodyPairsJobProcess<T>.CheckReflectionDataCorrect(jobReflectionData);
+
+                var parameters = new JobsUtility.JobScheduleParameters(UnsafeUtility.AddressOf(ref data), jobReflectionData, inputDeps, ScheduleMode.Parallel);
+                var listDataPtr = simulation.StepContext.PhasedDispatchPairs.GetUnsafeList();
+                return JobsUtility.ScheduleParallelForDeferArraySize(ref parameters, innerLoopBatchCount, listDataPtr, null);
+            }
+
+            return inputDeps;
+        }
+
         internal struct BodyPairsJobData<T> where T : struct
         {
             public T UserJobData;
             public NativeArray<DispatchPairSequencer.DispatchPair> PhasedDispatchPairs;
             //Need to disable aliasing restriction in case T has a NativeArray of PhysicsWorld.Bodies:
             [ReadOnly][NativeDisableContainerSafetyRestriction] public NativeArray<RigidBody> Bodies;
+            public bool IsParallel;
         }
 
         internal struct BodyPairsJobProcess<T> where T : struct, IBodyPairsJobBase
@@ -174,32 +190,56 @@ namespace Unity.Physics
             public unsafe static void Execute(ref BodyPairsJobData<T> jobData, IntPtr additionalData,
                 IntPtr bufferRangePatchData, ref JobRanges ranges, int jobIndex)
             {
-                for (int currentIdx = 0; currentIdx < jobData.PhasedDispatchPairs.Length; currentIdx++)
+                while (true)
                 {
-                    DispatchPairSequencer.DispatchPair dispatchPair = jobData.PhasedDispatchPairs[currentIdx];
+                    int startIndex = 0;
+                    int endIndex = jobData.PhasedDispatchPairs.Length;
 
-                    // Skip joint pairs and invalid pairs
-                    if (dispatchPair.IsJoint || !dispatchPair.IsValid)
+                    if (jobData.IsParallel)
                     {
-                        continue;
+                        if (!JobsUtility.GetWorkStealingRange(ref ranges, jobIndex, out startIndex, out endIndex))
+                            break;
+
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                        JobsUtility.PatchBufferMinMaxRanges(bufferRangePatchData, UnsafeUtility.AddressOf(ref jobData), startIndex, endIndex - startIndex);
+#endif
                     }
 
-                    var pair = new ModifiableBodyPair
+                    for (int currentIdx = startIndex; currentIdx < endIndex; currentIdx++)
                     {
-                        BodyIndexPair = new BodyIndexPair { BodyIndexA = dispatchPair.BodyIndexA, BodyIndexB = dispatchPair.BodyIndexB },
-                        EntityPair = new EntityPair
+                        DispatchPairSequencer.DispatchPair dispatchPair = jobData.PhasedDispatchPairs[currentIdx];
+
+                        // Skip joint pairs and invalid pairs
+                        if (dispatchPair.IsJoint || !dispatchPair.IsValid)
                         {
-                            EntityA = jobData.Bodies[dispatchPair.BodyIndexA].Entity,
-                            EntityB = jobData.Bodies[dispatchPair.BodyIndexB].Entity
+                            continue;
                         }
-                    };
 
-                    jobData.UserJobData.Execute(ref pair);
+                        var pair = new ModifiableBodyPair
+                        {
+                            BodyIndexPair =
+                                new BodyIndexPair
+                                {
+                                    BodyIndexA = dispatchPair.BodyIndexA, BodyIndexB = dispatchPair.BodyIndexB
+                                },
+                            EntityPair = new EntityPair
+                            {
+                                EntityA = jobData.Bodies[dispatchPair.BodyIndexA].Entity,
+                                EntityB = jobData.Bodies[dispatchPair.BodyIndexB].Entity
+                            }
+                        };
 
-                    if (pair.BodyIndexA == -1 || pair.BodyIndexB == -1)
-                    {
-                        jobData.PhasedDispatchPairs[currentIdx] = DispatchPairSequencer.DispatchPair.Invalid;
+                        jobData.UserJobData.Execute(ref pair);
+
+                        if (pair.BodyIndexA == -1 || pair.BodyIndexB == -1)
+                        {
+                            jobData.PhasedDispatchPairs[currentIdx] = DispatchPairSequencer.DispatchPair.Invalid;
+                        }
                     }
+
+                    // If we are not running in parallel, we are done.
+                    if (!jobData.IsParallel)
+                        break;
                 }
             }
 

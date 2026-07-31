@@ -74,7 +74,7 @@ namespace Unity.Physics.Authoring
                 AddComponent(entity, new PhysicsCompoundData()
                 {
                     AssociateBlobToBody = false,
-                    ConvertedBodyInstanceID = authoring.GetInstanceID(),
+                    ConvertedBodyEntityId = authoring.GetEntityId(),
                     Hash = default,
                 });
                 AddComponent<PhysicsRootBaked>(entity);
@@ -110,8 +110,8 @@ namespace Unity.Physics.Authoring
             {
                 AddComponent(entity, new PhysicsDamping
                 {
-                    Linear = authoring.drag,
-                    Angular = authoring.angularDrag
+                    Linear = authoring.linearDamping,
+                    Angular = authoring.angularDamping
                 });
                 if (!authoring.useGravity)
                     AddComponent(entity, new PhysicsGravityFactor { Value = 0f });

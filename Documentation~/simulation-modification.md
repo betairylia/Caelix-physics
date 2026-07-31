@@ -113,6 +113,8 @@ public partial struct DisableDynamicDynamicPairsSystem : ISystem
 }
 ```
 
+In the above example the `IBodyPairsJob` is run on a single thread. It can be beneficial for performance to schedule an `IBodyPairsJob` to run on multiple threads instead by using the method [`IBodyPairsJob.ScheduleParallel()`](xref:Unity.Physics.IBodyPairsJobExtensions.ScheduleParallel``1(``0,System.Int32,Unity.Physics.SimulationSingleton,Unity.Physics.PhysicsWorld@,Unity.Jobs.JobHandle)), and thereby processing the body pairs in parallel. This can lead to performance improvements if a large number of body pairs needs to be processed, or if the `IBodyPairsJob` has a high computational cost.
+
 ### Modification point 2 – After _PhysicsCreateContactsGroup_ and before _PhysicsCreateJacobiansGroup_
 
 **Status** – At this point, the simulation has performed the low-level collision information between every pair of bodies by inspecting their colliders.
@@ -149,6 +151,9 @@ public partial struct EnableSurfaceVelocitySystem : ISystem
     }
 }
 ```
+
+As was the case for the `IBodyPairsJob` above, the `IContactsJob` in this example is run on a single thread. For improved performance under high work loads it can be scheduled to run on multiple threads instead by using the method [`IContactsJob.ScheduleParallel()`](xref:Unity.Physics.IContactsJobExtensions.ScheduleParallel``1(``0,System.Int32,Unity.Physics.SimulationSingleton,Unity.Physics.PhysicsWorld@,Unity.Jobs.JobHandle)).
+
 
 ### Modification point 3 – After _PhysicsCreateJacobiansGroup_ and before _PhysicsSolveAndIntegrateGroup_
 
@@ -201,6 +206,9 @@ public partial struct SetFrictionToZeroSystem : ISystem
     }
 }
 ```
+
+As in the previous examples, again here the `IJacobiansJob` is run on a single thread and can be scheduled to run on multiple threads by using the method [`IJacobiansJob.ScheduleParallel()`](xref:Unity.Physics.IJacobiansJobExtensions.ScheduleParallel``1(``0,System.Int32,Unity.Physics.SimulationSingleton,Unity.Physics.PhysicsWorld@,Unity.Jobs.JobHandle)).
+
 
 ## Fine grained control of modification logics applied
 

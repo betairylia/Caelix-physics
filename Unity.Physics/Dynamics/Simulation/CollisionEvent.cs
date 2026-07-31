@@ -116,14 +116,12 @@ namespace Unity.Physics
     /// A stream of collision events. This is a value type, which means it can be used in Burst jobs
     /// (unlike IEnumerable&lt;CollisionEvent&gt;).
     /// </summary>
-    public struct CollisionEvents /* : IEnumerable<CollisionEvent> */
+    public struct CollisionEvents
     {
-        //@TODO: Unity should have a Allow null safety restriction
-        [NativeDisableContainerSafetyRestriction]
-        private readonly NativeStream m_EventDataStream;
+        readonly NativeStream m_EventDataStream;
         [ReadOnly]
-        private readonly NativeArray<Velocity> m_InputVelocities;
-        private readonly float m_TimeStep;
+        readonly NativeArray<Velocity> m_InputVelocities;
+        readonly float m_TimeStep;
 
         internal CollisionEvents(NativeStream eventDataStream, NativeArray<Velocity> inputVelocities, float timeStep)
         {
@@ -131,6 +129,10 @@ namespace Unity.Physics
             m_InputVelocities = inputVelocities;
             m_TimeStep = timeStep;
         }
+
+        internal NativeStream EventDataStream => m_EventDataStream;
+        internal NativeArray<Velocity> InputVelocities => m_InputVelocities;
+        internal float TimeStep => m_TimeStep;
 
         /// <summary>   Gets the enumerator. </summary>
         ///
@@ -141,15 +143,15 @@ namespace Unity.Physics
         }
 
         /// <summary>   An enumerator. </summary>
-        public struct Enumerator /* : IEnumerator<CollisionEvent> */
+        public struct Enumerator
         {
-            private NativeStream.Reader m_Reader;
-            private int m_CurrentWorkItem;
-            private readonly int m_NumWorkItems;
-            private CollisionEventDataRef m_Current;
+            NativeStream.Reader m_Reader;
+            int m_CurrentWorkItem;
+            readonly int m_WorkItemEnd;
+            CollisionEventDataRef m_Current;
 
-            private readonly NativeArray<Velocity> m_InputVelocities;
-            private readonly float m_TimeStep;
+            readonly NativeArray<Velocity> m_InputVelocities;
+            readonly float m_TimeStep;
 
             /// <summary>   Gets the current. </summary>
             ///
@@ -163,15 +165,27 @@ namespace Unity.Physics
             {
                 m_Reader = stream.IsCreated ? stream.AsReader() : new NativeStream.Reader();
                 m_CurrentWorkItem = 0;
-                m_NumWorkItems = stream.IsCreated ? stream.ForEachCount : 0;
+                m_WorkItemEnd = stream.IsCreated ? stream.ForEachCount : 0;
 
                 m_InputVelocities = inputVelocities;
                 m_TimeStep = timeStep;
 
-                unsafe
-                {
-                    m_Current = default;
-                }
+                m_Current = default;
+
+                AdvanceReader();
+            }
+
+            internal Enumerator(NativeStream.Reader reader, NativeArray<Velocity> inputVelocities, float timeStep,
+                int forEachIndexBegin, int forEachIndexEnd)
+            {
+                m_Reader = reader;
+                m_CurrentWorkItem = forEachIndexBegin;
+                m_WorkItemEnd = forEachIndexEnd;
+
+                m_InputVelocities = inputVelocities;
+                m_TimeStep = timeStep;
+
+                m_Current = default;
 
                 AdvanceReader();
             }
@@ -197,9 +211,9 @@ namespace Unity.Physics
                 return false;
             }
 
-            private void AdvanceReader()
+            void AdvanceReader()
             {
-                while (m_Reader.RemainingItemCount == 0 && m_CurrentWorkItem < m_NumWorkItems)
+                while (m_Reader.RemainingItemCount == 0 && m_CurrentWorkItem < m_WorkItemEnd)
                 {
                     m_Reader.BeginForEachIndex(m_CurrentWorkItem);
                     m_CurrentWorkItem++;

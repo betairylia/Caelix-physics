@@ -1,11 +1,12 @@
 using NUnit.Framework;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 
-namespace Unity.Physics.Tests.Dynamics.CollisionEvents
+namespace Unity.Physics.Tests.Dynamics.Events
 {
-    class CollisionEventsTests
+    class CollisionEventsTests : EventsTestBase
     {
         // Tests the situation where none of the contact points
         // reaches the contact plane after sub-integration using
@@ -96,5 +97,49 @@ namespace Unity.Physics.Tests.Dynamics.CollisionEvents
             // Dispose the world data
             simpleWorld.Dispose();
         }
+
+        [BurstCompile]
+        struct DummyCollisionEventsJob : ICollisionEventsJobBase
+        {
+            public void Execute(CollisionEvent collisionEvent)
+            {
+                // does nothing
+            }
+        }
+
+        [Test]
+        public void Test_ScheduleCollisionEventsJob_EmptySimulation()
+        {
+            // Note: we have to force this stage for the scheduling below to pass the simulation stage check
+            m_EmptySimulation.m_SimulationScheduleStage = SimulationScheduleStage.Idle;
+
+            // we expect this to not crash with an empty simulation
+            new DummyCollisionEventsJob().Schedule(m_EmptySimulationSingleton, default)
+                .Complete();
+        }
+
+        /// <summary>
+        /// Tests that the expected number of collision events are exported and can be processed serially by
+        /// event processing jobs regardless of the chosen solver types or threading options.
+        /// </summary>
+        [Test]
+        public void ExportCollisionEventsTest_StepJobs_SerialProcessing([Values] bool multiThreaded, [Values] SolverTypes solverTypes)
+            => VerifyExportEvents_StepJobs(multiThreaded, solverTypes, EventType.Collision, parallelEventProcessing: false);
+
+        /// <summary>
+        /// Tests that the expected number of collision events are exported and can be processed in parallel by
+        /// event processing jobs regardless of the chosen solver types or threading options.
+        /// </summary>
+        [Test]
+        public void ExportCollisionEventsTest_StepJobs_ParallelProcessing([Values] bool multiThreaded, [Values] SolverTypes solverTypes)
+            => VerifyExportEvents_StepJobs(multiThreaded, solverTypes, EventType.Collision, parallelEventProcessing: true);
+
+        /// <summary>
+        /// Tests that the expected number of collision events are exported in immediate mode regardless of the chosen
+        /// solver types.
+        /// </summary>
+        [Test]
+        public void ExportCollisionEventsTest_StepImmediate([Values] SolverTypes solverTypes)
+            => VerifyExportEvents_StepImmediate(solverTypes, EventType.Collision);
     }
 }

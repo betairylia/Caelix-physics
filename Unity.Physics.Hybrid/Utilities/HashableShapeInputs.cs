@@ -19,7 +19,7 @@ namespace Unity.Physics.Authoring
 
         readonly Aabb Bounds;
 
-        public readonly int MeshKey; // TODO: currently assumes each mesh asset will have consistent data between hashes; should instead hash vertices/triangles
+        public readonly EntityId MeshKey; // TODO: currently assumes each mesh asset will have consistent data between hashes; should instead hash vertices/triangles
         public readonly float4x4 BodyFromShape;
         public readonly int IncludedIndicesStartIndex;
         public readonly int IncludedIndicesCount;
@@ -43,7 +43,7 @@ namespace Unity.Physics.Authoring
         {
             using (var result = new NativeArray<HashableShapeInputs>(1, Allocator.TempJob))
             {
-                int meshKey = default;
+                EntityId meshKey = default;
                 Bounds bounds = default;
                 NativeArray<int> tmpIndices;
                 NativeList<int> tmpAllIndices;
@@ -58,7 +58,7 @@ namespace Unity.Physics.Authoring
                 }
                 else
                 {
-                    meshKey = mesh.GetInstanceID();
+                    meshKey = mesh.GetEntityId();
                     bounds = mesh.bounds;
                     tmpIndices = new NativeArray<int>(includedIndices, Allocator.TempJob);
                     tmpAllIndices = new NativeList<int>(allIncludedIndices.Length, Allocator.TempJob);
@@ -105,7 +105,7 @@ namespace Unity.Physics.Authoring
         {
             public NativeArray<HashableShapeInputs> Result;
 
-            public int MeshKey;
+            public EntityId MeshKey;
             public Bounds Bounds;
             public float4x4 LeafToBody;
             [ReadOnly] public NativeArray<int> IncludedIndices;
@@ -119,7 +119,7 @@ namespace Unity.Physics.Authoring
         }
 
         HashableShapeInputs(
-            int meshKey, Bounds bounds, float4x4 leafToBody,
+            EntityId meshKey, Bounds bounds, float4x4 leafToBody,
             float linearPrecision = k_DefaultLinearPrecision
         )
         {
@@ -141,7 +141,7 @@ namespace Unity.Physics.Authoring
         }
 
         HashableShapeInputs(
-            int meshKey, Bounds bounds, float4x4 leafToBody,
+            EntityId meshKey, Bounds bounds, float4x4 leafToBody,
             NativeArray<int> includedIndices, NativeList<int> allIncludedIndices,
             NativeArray<float> blendShapeWeights, NativeList<float> allBlendShapeWeights,
             float linearPrecision = k_DefaultLinearPrecision

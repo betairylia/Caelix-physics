@@ -61,14 +61,15 @@ namespace Unity.Physics
     /// </summary>
     public struct TriggerEvents /* : IEnumerable<TriggerEvent> */
     {
-        //@TODO: Unity should have a Allow null safety restriction
         [NativeDisableContainerSafetyRestriction]
-        private readonly NativeStream m_EventDataStream;
+        readonly NativeStream m_EventDataStream;
 
         internal TriggerEvents(NativeStream eventDataStream)
         {
             m_EventDataStream = eventDataStream;
         }
+
+        internal NativeStream EventDataStream => m_EventDataStream;
 
         /// <summary>   Gets the enumerator. </summary>
         ///
@@ -81,9 +82,9 @@ namespace Unity.Physics
         /// <summary>   An enumerator. </summary>
         public struct Enumerator /* : IEnumerator<TriggerEvent> */
         {
-            private NativeStream.Reader m_Reader;
-            private int m_CurrentWorkItem;
-            private readonly int m_NumWorkItems;
+            NativeStream.Reader m_Reader;
+            int m_CurrentWorkItem;
+            readonly int m_WorkItemEnd;
 
             /// <summary>   Gets or sets the current. </summary>
             ///
@@ -94,7 +95,17 @@ namespace Unity.Physics
             {
                 m_Reader = stream.IsCreated ? stream.AsReader() : new NativeStream.Reader();
                 m_CurrentWorkItem = 0;
-                m_NumWorkItems = stream.IsCreated ? stream.ForEachCount : 0;
+                m_WorkItemEnd = stream.IsCreated ? stream.ForEachCount : 0;
+                Current = default;
+
+                AdvanceReader();
+            }
+
+            internal Enumerator(NativeStream.Reader reader, int forEachIndexBegin, int forEachIndexEnd)
+            {
+                m_Reader = reader;
+                m_CurrentWorkItem = forEachIndexBegin;
+                m_WorkItemEnd = forEachIndexEnd;
                 Current = default;
 
                 AdvanceReader();
@@ -117,9 +128,9 @@ namespace Unity.Physics
                 return false;
             }
 
-            private void AdvanceReader()
+            void AdvanceReader()
             {
-                while (m_Reader.RemainingItemCount == 0 && m_CurrentWorkItem < m_NumWorkItems)
+                while (m_Reader.RemainingItemCount == 0 && m_CurrentWorkItem < m_WorkItemEnd)
                 {
                     m_Reader.BeginForEachIndex(m_CurrentWorkItem);
                     m_CurrentWorkItem++;

@@ -2,15 +2,12 @@
 uid: tag-physics-body
 ---
 
-# Custom Physics Body Tag
+# Custom Physics Body Tags: Defining custom behavior
 
-To define a custom behavior, add custom component data to an entity and then check if an entity contains certain component data in the code of an event handler or a modifier.
-
-If you're using custom component data as a flag (when it's an empty `IComponentData`), there are few downsides to this approach:
+In order to define custom behavior with Entities, you can add a custom component to an entity and then check if an entity contains such a component in a system that models the custom behavior. If you're using custom components just as a flag (that is, when the added `IComponentData` is empty), there are a few downsides to this approach:
 
 * Creating an empty authoring component and baker for empty component data adds more boilerplate code.
-* Adding and removing component data requires sync points.
-* A large number of optional components in your modifer or event handling jobs and then checking if entity contains those components can slow down performance.
+* Adding and removing component data requires sync points and causes structural changes.
 
 You can use a Custom Physics Body Tag to work around these restrictions, and flag up to eight custom behaviors for each rigid body. Some [modifiable intermediate simulation data](simulation-modification.md), like `ModifiableContactHeader`, already contains custom physics body tag values. In other cases, game logic can get the `Rigidbody.CustomTag` value by pulling `Rigidbody` data from `CollisionWord.Bodies` array:
 

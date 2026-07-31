@@ -8,22 +8,22 @@ namespace Unity.Physics.Authoring
 {
     struct ColliderInstanceId : IEquatable<ColliderInstanceId>
     {
-        public ColliderInstanceId(Hash128 blobDataHash, int authoringComponentId)
+        public ColliderInstanceId(Hash128 blobDataHash, EntityId authoringComponentEntityId)
         {
             BlobDataHash = blobDataHash;
-            AuthoringComponentId = authoringComponentId;
+            AuthoringComponentEntityId = authoringComponentEntityId;
         }
 
         readonly Hash128 BlobDataHash;
-        readonly int AuthoringComponentId;
+        readonly EntityId AuthoringComponentEntityId;
 
         public bool Equals(ColliderInstanceId other) =>
-            BlobDataHash.Equals(other.BlobDataHash) && AuthoringComponentId == other.AuthoringComponentId;
+            BlobDataHash.Equals(other.BlobDataHash) && AuthoringComponentEntityId == other.AuthoringComponentEntityId;
 
         public override bool Equals(object obj) => obj is ColliderInstanceId other && Equals(other);
 
         public override int GetHashCode() =>
-            (int)math.hash(new uint2((uint)BlobDataHash.GetHashCode(), (uint)AuthoringComponentId));
+            (int)math.hash(new uint2((uint)BlobDataHash.GetHashCode(), (uint)AuthoringComponentEntityId.GetHashCode()));
 
         public static bool operator==(ColliderInstanceId left, ColliderInstanceId right) => left.Equals(right);
 
@@ -33,9 +33,9 @@ namespace Unity.Physics.Authoring
     // structure with minimal data needed to incrementally convert a shape that is possibly part of a compound collider
     struct ColliderInstanceBaking : IEquatable<ColliderInstanceBaking>
     {
-        public int AuthoringComponentId;
-        public int ConvertedAuthoringInstanceID; // Instance ID of the GameObject with the Collider
-        public int ConvertedBodyInstanceID;      // Instance ID of the GameObject with the body
+        public EntityId AuthoringComponentEntityId;
+        public EntityId ConvertedAuthoringEntityId; // Entity ID of the GameObject with the Collider
+        public EntityId ConvertedBodyEntityId;      // Entity ID of the GameObject with the body
         public Entity BodyEntity;
         public Entity ShapeEntity;
         public Entity ChildEntity;
@@ -73,9 +73,9 @@ namespace Unity.Physics.Authoring
 
         public bool Equals(ColliderInstanceBaking other)
         {
-            return AuthoringComponentId == other.AuthoringComponentId
-                && ConvertedAuthoringInstanceID == other.ConvertedAuthoringInstanceID
-                && ConvertedBodyInstanceID == other.ConvertedBodyInstanceID
+            return AuthoringComponentEntityId == other.AuthoringComponentEntityId
+                && ConvertedAuthoringEntityId == other.ConvertedAuthoringEntityId
+                && ConvertedBodyEntityId == other.ConvertedBodyEntityId
                 && BodyEntity.Equals(other.BodyEntity)
                 && ShapeEntity.Equals(other.ShapeEntity)
                 && BodyFromShape.Equals(other.BodyFromShape)
@@ -88,9 +88,9 @@ namespace Unity.Physics.Authoring
         {
             unchecked
             {
-                var hashCode = AuthoringComponentId;
-                hashCode = (hashCode * 397) ^ ConvertedAuthoringInstanceID;
-                hashCode = (hashCode * 397) ^ ConvertedBodyInstanceID;
+                var hashCode = AuthoringComponentEntityId.GetHashCode();
+                hashCode = (hashCode * 397) ^ ConvertedAuthoringEntityId.GetHashCode();
+                hashCode = (hashCode * 397) ^ ConvertedBodyEntityId.GetHashCode();
                 hashCode = (hashCode * 397) ^ BodyEntity.GetHashCode();
                 hashCode = (hashCode * 397) ^ ShapeEntity.GetHashCode();
                 hashCode = (hashCode * 397) ^ BodyFromShape.GetHashCode();
@@ -99,7 +99,7 @@ namespace Unity.Physics.Authoring
             }
         }
 
-        public ColliderInstanceId ToColliderInstanceId() => new ColliderInstanceId(Hash, AuthoringComponentId);
+        public ColliderInstanceId ToColliderInstanceId() => new ColliderInstanceId(Hash, AuthoringComponentEntityId);
     }
 
     internal struct ShapeComputationDataBaking
