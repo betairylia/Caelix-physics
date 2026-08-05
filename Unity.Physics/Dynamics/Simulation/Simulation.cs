@@ -764,6 +764,8 @@ namespace Unity.Physics
         public unsafe SimulationJobHandles ScheduleStepJobs(SimulationStepInput input, JobHandle inputDeps, bool multiThreaded = true)
         {
             ScheduleBroadphaseJobs(input, inputDeps, multiThreaded);
+            // TODO: Inject MarkBricks Jobs here to produce brick pairs for narrow-phase.
+            // TODO: Optional narrow-phase if physics is not enabled.
             ScheduleNarrowphaseJobs(input, m_StepHandles.FinalExecutionHandle, multiThreaded);
             ScheduleCreateJacobiansJobs(input, m_StepHandles.FinalExecutionHandle, multiThreaded);
             ScheduleSolveAndIntegrateJobs(input, m_StepHandles.FinalExecutionHandle, multiThreaded);

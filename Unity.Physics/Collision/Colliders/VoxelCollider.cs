@@ -60,10 +60,17 @@ namespace Unity.Physics
                 // Calculate the min and max corners of this sector in local space
                 float3 sectorMin = sectorCoord * Sector.SECTOR_SIZE_IN_BLOCKS;
                 float3 sectorMax = (sectorCoord + 1) * Sector.SECTOR_SIZE_IN_BLOCKS;
+                
+                // TODO: FIXME: Seems still unusable; change to this sane thing after finished the blockAABB update
+                // float3 sectorMin = sectorCoord * Sector.SECTOR_SIZE_IN_BLOCKS + m_Sectors[keys[i]].Ptr->blockAABB.Min;
+                // float3 sectorMax = sectorCoord * Sector.SECTOR_SIZE_IN_BLOCKS + m_Sectors[keys[i]].Ptr->blockAABB.Max;
 
-                // Expand the overall AABB to include this sector
-                localAabb.Include(sectorMin);
-                localAabb.Include(sectorMax);
+                if (!math.any(sectorMin >= sectorMax))
+                {
+                    // Expand the overall AABB to include this sector
+                    localAabb.Include(sectorMin);
+                    localAabb.Include(sectorMax);
+                }
             }
             keys.Dispose();
 

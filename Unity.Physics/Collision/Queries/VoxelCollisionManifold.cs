@@ -402,7 +402,7 @@ namespace Unity.Physics
 
                     var sectorB = sectorsB[sectorCoordB];
 
-                    foreach (Voxelis.BlockIterator blockIter in new Voxelis.SectorNonEmptyBlockEnumerator(*sectorA.Ptr))
+                    foreach (Voxelis.SectorBitmaskSlotIterator<Block> blockIter in sectorA.Ptr->EnumerateNonEmptyBlocks())
                     {
                         int3 posInA = blockIter.position;
 
