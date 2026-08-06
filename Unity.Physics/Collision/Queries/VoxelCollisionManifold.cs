@@ -162,10 +162,10 @@ namespace Unity.Physics
                 voxelB,
                 materialA,
                 materialB,
-                worldFromB,
                 worldFromA,
+                worldFromB,
                 maxDistance,
-                !flipped);
+                flipped);
         }
 
         private static unsafe void _VoxelVoxel(
