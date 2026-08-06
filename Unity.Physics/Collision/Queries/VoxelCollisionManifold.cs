@@ -385,9 +385,20 @@ namespace Unity.Physics
             return true;
         }
 
-        // For every exposed A voxel, probe the B cells within sphere reach, mask the
-        // center-to-center direction by B's face exposure (footprint-gated, see header), and
-        // append one raw contact per surviving probe.
+        // Voxel-vs-voxel raw contact generation, key-block sourced and brick-culled:
+        //
+        //   Pass 1 (A-side): every allocated brick of A inside B's reach conservatively marks
+        //   the allocated B bricks it may pair with, then each of the brick's physics-KEY
+        //   blocks (Corner/Edge) probes the B cells within its window.
+        //   Pass 2 (B-side): the key blocks of every marked B brick probe A's cells the same
+        //   way, skipping A-key targets — those pairs were already emitted by pass 1.
+        //
+        // Key-sourcing is exact, not an approximation: ApplyNormalMasking only lets pairs with
+        // constraint-rank sum <= 2 survive (Corner-Corner, Corner-Edge, Corner-Face, Edge-Edge),
+        // so every surviving pair has at least one key side, and the two passes together cover
+        // the same contact set the previous full non-empty-block sweep produced. Probes read
+        // the opposite body through its m_Sectors hashmap directly, so windows cross sector
+        // boundaries transparently and no per-sector-pair loop is needed.
         static unsafe void CollectVoxelContacts(
             VoxelCollider* voxelA,
             VoxelCollider* voxelB,
@@ -398,7 +409,9 @@ namespace Unity.Physics
             var sectorsA = voxelA->m_Sectors;
             var sectorsB = voxelB->m_Sectors;
 
-            // Conservative per-axis extent of a rotated A sector in B space (for culling only;
+            MTransform aFromB = Inverse(bFromA);
+
+            // Conservative per-axis extent of a rotated A box in B space (for culling only;
             // the sphere contact metric itself is rotation invariant).
             float3x3 rot = bFromA.Rotation;
             float3 rowAbsSum = math.abs(rot.c0) + math.abs(rot.c1) + math.abs(rot.c2);
@@ -415,161 +428,330 @@ namespace Unity.Physics
             float maxCenterDistance = 1.0f + maxDistance;
             float maxCenterDistanceSq = maxCenterDistance * maxCenterDistance;
 
-            var keysA = sectorsA.GetKeyArray(Allocator.Temp);
+            // Whole-body bounds of B in its own grid (sector granularity), for A-sector culling.
             var keysB = sectorsB.GetKeyArray(Allocator.Temp);
+            if (keysB.Length == 0)
+            {
+                keysB.Dispose();
+                return;
+            }
+            int3 sectorMinB = keysB[0];
+            int3 sectorMaxB = keysB[0];
+            for (int i = 1; i < keysB.Length; i++)
+            {
+                sectorMinB = math.min(sectorMinB, keysB[i]);
+                sectorMaxB = math.max(sectorMaxB, keysB[i]);
+            }
+            keysB.Dispose();
+            float3 boundsCenterB = (float3)(sectorMinB + sectorMaxB + 1) * (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
+            float3 boundsHalfB = (float3)(sectorMaxB + 1 - sectorMinB) * (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
 
-            // TODO: Maybe optimize this nested O(N_sector_A * N_sector_B) loop? Perhaps this is not needed.
+            // Allocated B bricks (global brick coords) some A brick may pair with; the B-side
+            // pass sources its key blocks from exactly these.
+            var overlappedBricksB = new UnsafeHashSet<int3>(64, Allocator.Temp);
+
+            var keysA = sectorsA.GetKeyArray(Allocator.Temp);
             for (int iSectorA = 0; iSectorA < keysA.Length; iSectorA++)
             {
                 int3 sectorCoordA = keysA[iSectorA];
                 var sectorA = sectorsA[sectorCoordA];
                 int3 sectorOriginA = sectorCoordA * Sector.SECTOR_SIZE_IN_BLOCKS;
 
-                // Conservative bounds of this A sector in B grid space, for sector pair culling.
+                // Cull A sectors that cannot reach B at all.
                 float3 sectorCenterInB = Mul(bFromA, (float3)sectorOriginA + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
                 float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS) * rowAbsSum;
-
-                for (int iSectorB = 0; iSectorB < keysB.Length; iSectorB++)
+                float3 sectorDelta = math.abs(sectorCenterInB - boundsCenterB);
+                if (math.any(sectorDelta > sectorHalfExtentInB + boundsHalfB + windowHalfWidth))
                 {
-                    int3 sectorCoordB = keysB[iSectorB];
-                    int3 sectorOriginB = sectorCoordB * Sector.SECTOR_SIZE_IN_BLOCKS;
+                    continue;
+                }
 
-                    // Cull sector pairs that cannot possibly touch.
-                    float3 sectorDelta = math.abs(
-                        sectorCenterInB - ((float3)sectorOriginB + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS));
-                    if (math.any(sectorDelta >
-                        sectorHalfExtentInB + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS + windowHalfWidth))
+                foreach (SectorNonEmptyBrickEnumerator.BrickRef brickRef in sectorA.Ptr->EnumerateNonEmptyBricks())
+                {
+                    int3 brickOriginBlocks = sectorOriginA
+                        + Sector.ToBrickPos((short)brickRef.BrickAbs) * Sector.SIZE_IN_BLOCKS;
+
+                    // Brick-level cull. Marking is unconditional: a key-less A brick still owns
+                    // Face blocks that the B-side pass must probe. Only the key enumeration
+                    // below is gated on the result.
+                    bool overlapsB = MarkOverlappedBricksInB(
+                        brickOriginBlocks, voxelB, bFromA, rowAbsSum, windowHalfWidth,
+                        ref overlappedBricksB);
+                    if (!overlapsB)
                     {
                         continue;
                     }
 
-                    var sectorB = sectorsB[sectorCoordB];
-
-                    foreach (Voxelis.SectorBitmaskSlotIterator<Block> blockIter in sectorA.Ptr->EnumerateNonEmptyBlocks())
+                    foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
+                        sectorA.Ptr->EnumeratePhysicsKeyBlocksInBrick(brickRef.Bid, brickOriginBlocks))
                     {
-                        int3 posInA = blockIter.position;
+                        HandleBlock(
+                            blockIter.position, blockIter.value, voxelA, voxelB,
+                            bFromA, aFromB, windowHalfWidth, maxCenterDistanceSq,
+                            isSourceFromB: false, ref contacts);
+                    }
+                }
+            }
+            keysA.Dispose();
 
-                        // Fully interior A voxels (no exposed faces) cannot make surface contact;
-                        // skipping them turns O(volume) into O(surface) for large bodies. Note this
-                        // relies on the PhysicsInfo slot being up to date (RefreshPhysicsSlot).
-                        PhysicsInfo infoA = sectorA.GetSlot<PhysicsInfo>(
-                            SectorSlotId.PhysicsInfo, posInA.x, posInA.y, posInA.z);
-                        if (infoA.data == 0)
+            // B-side pass: key blocks of every marked B brick probe A's cells.
+            foreach (int3 brickCoordB in overlappedBricksB)
+            {
+                int3 sectorCoordB = brickCoordB >> Sector.SHIFT_IN_BRICKS;
+                int3 brickPosInSector = brickCoordB & Sector.SECTOR_MASK;
+
+                // Present and allocated by construction: only allocated B bricks get marked.
+                var sectorB = sectorsB[sectorCoordB];
+                short bid = sectorB.Ptr->brickIdx[
+                    Sector.ToBrickIdx(brickPosInSector.x, brickPosInSector.y, brickPosInSector.z)];
+
+                int3 brickOriginBlocks = brickCoordB * Sector.SIZE_IN_BLOCKS;
+                foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
+                    sectorB.Ptr->EnumeratePhysicsKeyBlocksInBrick(bid, brickOriginBlocks))
+                {
+                    HandleBlock(
+                        blockIter.position, blockIter.value, voxelA, voxelB,
+                        bFromA, aFromB, windowHalfWidth, maxCenterDistanceSq,
+                        isSourceFromB: true, ref contacts);
+                }
+            }
+            overlappedBricksB.Dispose();
+        }
+
+        // Tests one A brick (8³ blocks, given by its min-corner block coord in A grid) against
+        // B's allocated bricks: every allocated B brick whose cells could fall inside the probe
+        // window of some voxel of this brick is added to `overlapped`. Returns whether any was.
+        // The bound is the brick's voxel-center cloud in B space (center ± 3.5·|R| per axis)
+        // dilated by the per-voxel window; per-axis distance never exceeds center distance in
+        // any frame, so this is conservative for both passes' windows.
+        static unsafe bool MarkOverlappedBricksInB(
+            int3 brickOriginBlocksA,
+            VoxelCollider* voxelB,
+            in MTransform bFromA,
+            float3 rowAbsSum,
+            float windowHalfWidth,
+            ref UnsafeHashSet<int3> overlapped)
+        {
+            float3 centerInB = Mul(bFromA, (float3)brickOriginBlocksA + 0.5f * Sector.SIZE_IN_BLOCKS);
+            float3 halfExtent = (0.5f * Sector.SIZE_IN_BLOCKS - 0.5f) * rowAbsSum + windowHalfWidth;
+
+            // B cells whose centers can lie inside the dilated cloud, then the bricks holding
+            // them (arithmetic shifts floor-divide correctly for negative coords).
+            int3 cellLo = (int3)math.ceil(centerInB - halfExtent - 0.5f);
+            int3 cellHi = (int3)math.floor(centerInB + halfExtent - 0.5f);
+            int3 brickLo = cellLo >> Sector.SHIFT_IN_BLOCKS;
+            int3 brickHi = cellHi >> Sector.SHIFT_IN_BLOCKS;
+
+            bool any = false;
+
+            // One-entry sector cache: the (tiny) brick range rarely straddles a sector boundary.
+            // TODO: Fold into the future per-thread sector/brick cache shared with voxel queries.
+            int3 cachedSectorCoord = default;
+            SectorHandle cachedHandle = default;
+            bool cacheValid = false;
+            bool cachedExists = false;
+
+            for (int gz = brickLo.z; gz <= brickHi.z; gz++)
+            {
+                for (int gy = brickLo.y; gy <= brickHi.y; gy++)
+                {
+                    for (int gx = brickLo.x; gx <= brickHi.x; gx++)
+                    {
+                        int3 brickCoord = new int3(gx, gy, gz);
+                        int3 sectorCoord = brickCoord >> Sector.SHIFT_IN_BRICKS;
+
+                        if (!cacheValid || math.any(sectorCoord != cachedSectorCoord))
+                        {
+                            cachedExists = voxelB->m_Sectors.TryGetValue(sectorCoord, out cachedHandle)
+                                && !cachedHandle.IsNull;
+                            cachedSectorCoord = sectorCoord;
+                            cacheValid = true;
+                        }
+                        if (!cachedExists)
                         {
                             continue;
                         }
 
-                        int3 voxelCoordA = sectorOriginA + posInA;
-                        float3 centerInB = Mul(bFromA, (float3)voxelCoordA + 0.5f);
-                        float3 centerLocalB = centerInB - (float3)sectorOriginB;
-
-                        // TODO: Check this thing's tightness.
-                        // TODO: FIXME: The lo-hi AABB is too loose to ensure interior voxels are not visited
-                        // in below loop, and renders the necessity of ownedByNeighbor. It should be possible
-                        // to completely remove this additional flag for simplicity and correctness.
-
-                        // Candidate B cells whose centers lie within the search window, clamped to
-                        // this sector (other sectors of B get their own pass of the outer loop).
-                        int3 lo = (int3)math.ceil(centerLocalB - 0.5f - windowHalfWidth);
-                        int3 hi = (int3)math.floor(centerLocalB - 0.5f + windowHalfWidth);
-                        lo = math.max(lo, 0);
-                        hi = math.min(hi, Sector.SECTOR_SIZE_IN_BLOCKS - 1);
-                        if (math.any(lo > hi))
+                        int3 p = brickCoord & Sector.SECTOR_MASK;
+                        if (cachedHandle.Ptr->brickIdx[Sector.ToBrickIdx(p.x, p.y, p.z)] == Sector.BRICKID_EMPTY)
                         {
                             continue;
                         }
 
-                        for (int bz = lo.z; bz <= hi.z; bz++)
-                        {
-                            for (int by = lo.y; by <= hi.y; by++)
-                            {
-                                for (int bx = lo.x; bx <= hi.x; bx++)
-                                {
-                                    var dstBlock = sectorB.GetBlock(bx, by, bz);
-                                    if (dstBlock.isEmpty)
-                                    {
-                                        continue;
-                                    }
-
-                                    PhysicsInfo infoB = sectorB.GetSlot<PhysicsInfo>(
-                                        SectorSlotId.PhysicsInfo, bx, by, bz);
-
-                                    float3 cellCenter = new float3(bx, by, bz) + 0.5f;
-                                    float3 delta = centerLocalB - cellCenter;
-
-                                    // Apply normal masking and filter phantoms & face-edge & face-face
-                                    bool shouldProceed = ApplyNormalMasking(delta, infoA, infoB, bFromA, out float3 maskedDelta, out int normalBin);
-
-                                    if (!shouldProceed)
-                                    {
-                                        continue;
-                                    }
-
-                                    // Check distance
-
-                                    float distanceSq = math.lengthsq(maskedDelta);
-                                    if (distanceSq <= 0.0f || distanceSq >= maxCenterDistanceSq)
-                                    {
-                                        continue;
-                                    }
-
-                                    float centerDistance = math.sqrt(distanceSq);
-                                    float3 normalInB = maskedDelta / centerDistance;
-                                    float separation = centerDistance - 1.0f; // both radii 0.5
-
-                                    // Exactly one non-zero component left after masking makes an
-                                    // axis-face contact (masked components are exactly zero).
-                                    int faceAxis = -1;
-                                    int nonZero = 0;
-                                    for (int axis = 0; axis < 3; axis++)
-                                    {
-                                        if (maskedDelta[axis] != 0.0f)
-                                        {
-                                            nonZero++;
-                                            faceAxis = axis;
-                                        }
-                                    }
-
-                                    if (nonZero != 1)
-                                    {
-                                        faceAxis = -1;
-                                    }
-
-                                    // TODO: Do we really need this snap?
-                                    // Axis-aligned contacts snap laterally to the A voxel center
-                                    // on the B face plane (no phantom torque); diagonal contacts
-                                    // sit on the B sphere surface.
-                                    float3 posInB;
-                                    if (faceAxis >= 0)
-                                    {
-                                        posInB = centerInB;
-                                        posInB[faceAxis] = sectorOriginB[faceAxis] + cellCenter[faceAxis]
-                                            + (maskedDelta[faceAxis] > 0.0f ? 0.5f : -0.5f);
-                                    }
-                                    else
-                                    {
-                                        posInB = (float3)sectorOriginB + cellCenter + 0.5f * normalInB;
-                                    }
-
-                                    contacts.Add(new VoxelContact
-                                    {
-                                        Distance = separation,
-                                        NormalInB = normalInB,
-                                        PosInB = posInB,
-                                        VoxelA = voxelCoordA,
-                                        VoxelB = sectorOriginB + new int3(bx, by, bz),
-                                        normalBin = normalBin
-                                        // Diagonal = faceAxis < 0
-                                    });
-                                }
-                            }
-                        }
+                        overlapped.Add(brickCoord);
+                        any = true;
                     }
                 }
             }
 
-            keysA.Dispose();
-            keysB.Dispose();
+            return any;
+        }
+
+        // Probes every candidate cell of the opposite body within the window around one source
+        // key block and appends the surviving contacts. The pair math (masking, gating, contact
+        // position) always runs in B grid space with the A/B roles fixed, so both passes emit
+        // identical contacts for identical pairs.
+        static unsafe void HandleBlock(
+            int3 sourceCoord,
+            PhysicsInfo sourceInfo,
+            VoxelCollider* voxelA,
+            VoxelCollider* voxelB,
+            in MTransform bFromA,
+            in MTransform aFromB,
+            float windowHalfWidth,
+            float maxCenterDistanceSq,
+            bool isSourceFromB,
+            ref UnsafeList<VoxelContact> contacts)
+        {
+            if (!isSourceFromB)
+            {
+                // An A key voxel probes B cells; the delta lives directly in B space.
+                float3 centerInB = Mul(bFromA, (float3)sourceCoord + 0.5f);
+
+                int3 lo = (int3)math.ceil(centerInB - 0.5f - windowHalfWidth);
+                int3 hi = (int3)math.floor(centerInB - 0.5f + windowHalfWidth);
+
+                for (int bz = lo.z; bz <= hi.z; bz++)
+                {
+                    for (int by = lo.y; by <= hi.y; by++)
+                    {
+                        for (int bx = lo.x; bx <= hi.x; bx++)
+                        {
+                            int3 cellCoord = new int3(bx, by, bz);
+                            voxelB->GetBlockAndPhysicsInfo(cellCoord, out Block cellBlock, out PhysicsInfo infoB);
+                            if (cellBlock.isEmpty)
+                            {
+                                continue;
+                            }
+
+                            EmitVoxelPairContact(
+                                sourceCoord, sourceInfo, cellCoord, infoB, centerInB,
+                                bFromA, maxCenterDistanceSq, ref contacts);
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // A B key cell probes A voxels; candidates are found in A grid space.
+                float3 cellCenterInB = (float3)sourceCoord + 0.5f;
+                float3 centerInA = Mul(aFromB, cellCenterInB);
+
+                int3 lo = (int3)math.ceil(centerInA - 0.5f - windowHalfWidth);
+                int3 hi = (int3)math.floor(centerInA - 0.5f + windowHalfWidth);
+
+                for (int az = lo.z; az <= hi.z; az++)
+                {
+                    for (int ay = lo.y; ay <= hi.y; ay++)
+                    {
+                        for (int ax = lo.x; ax <= hi.x; ax++)
+                        {
+                            int3 voxelCoordA = new int3(ax, ay, az);
+                            voxelA->GetBlockAndPhysicsInfo(voxelCoordA, out Block aBlock, out PhysicsInfo infoA);
+                            if (aBlock.isEmpty)
+                            {
+                                continue;
+                            }
+
+                            // Key-key pairs were already emitted by the A-side pass.
+                            if (infoA.IsPhysicsKey)
+                            {
+                                continue;
+                            }
+
+                            // The pair math needs A's center in B space. Rotating the A-space
+                            // offset equals Mul(bFromA, aVoxelCenter): the translation cancels
+                            // between the two points.
+                            float3 centerAInB = cellCenterInB
+                                + math.mul(bFromA.Rotation, (float3)voxelCoordA + 0.5f - centerInA);
+
+                            EmitVoxelPairContact(
+                                voxelCoordA, infoA, sourceCoord, sourceInfo, centerAInB,
+                                bFromA, maxCenterDistanceSq, ref contacts);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Masks, gates and appends one (A voxel, B cell) probe. Voxel coordinates are global
+        // grid coords of their own body; centerAInB is A's voxel center expressed in B grid
+        // space.
+        static void EmitVoxelPairContact(
+            int3 voxelCoordA,
+            PhysicsInfo infoA,
+            int3 voxelCoordB,
+            PhysicsInfo infoB,
+            float3 centerAInB,
+            in MTransform bFromA,
+            float maxCenterDistanceSq,
+            ref UnsafeList<VoxelContact> contacts)
+        {
+            float3 cellCenter = (float3)voxelCoordB + 0.5f;
+            float3 delta = centerAInB - cellCenter;
+
+            // Apply normal masking and filter phantoms & face-edge & face-face
+            bool shouldProceed = ApplyNormalMasking(
+                delta, infoA, infoB, bFromA, out float3 maskedDelta, out int normalBin);
+            if (!shouldProceed)
+            {
+                return;
+            }
+
+            // Check distance
+            float distanceSq = math.lengthsq(maskedDelta);
+            if (distanceSq <= 0.0f || distanceSq >= maxCenterDistanceSq)
+            {
+                return;
+            }
+
+            float centerDistance = math.sqrt(distanceSq);
+            float3 normalInB = maskedDelta / centerDistance;
+            float separation = centerDistance - 1.0f; // both radii 0.5
+
+            // Exactly one non-zero component left after masking makes an
+            // axis-face contact (masked components are exactly zero).
+            int faceAxis = -1;
+            int nonZero = 0;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                if (maskedDelta[axis] != 0.0f)
+                {
+                    nonZero++;
+                    faceAxis = axis;
+                }
+            }
+
+            if (nonZero != 1)
+            {
+                faceAxis = -1;
+            }
+
+            // TODO: Do we really need this snap?
+            // Axis-aligned contacts snap laterally to the A voxel center
+            // on the B face plane (no phantom torque); diagonal contacts
+            // sit on the B sphere surface.
+            float3 posInB;
+            if (faceAxis >= 0)
+            {
+                posInB = centerAInB;
+                posInB[faceAxis] = cellCenter[faceAxis] + (maskedDelta[faceAxis] > 0.0f ? 0.5f : -0.5f);
+            }
+            else
+            {
+                posInB = cellCenter + 0.5f * normalInB;
+            }
+
+            contacts.Add(new VoxelContact
+            {
+                Distance = separation,
+                NormalInB = normalInB,
+                PosInB = posInB,
+                VoxelA = voxelCoordA,
+                VoxelB = voxelCoordB,
+                normalBin = normalBin
+                // Diagonal = faceAxis < 0
+            });
         }
 
         // Writes one single-point manifold and one contact event per raw contact. No merging,
