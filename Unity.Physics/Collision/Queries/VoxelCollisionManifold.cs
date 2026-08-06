@@ -113,7 +113,8 @@ namespace Unity.Physics
             Material materialA = voxelA->Material;
             Material materialB = voxelB->Material;
 
-            CollisionResponsePolicy combinedCollisionResponse = Material.GetCombinedCollisionResponse(materialA, materialB);
+            CollisionResponsePolicy combinedCollisionResponse =
+                Material.GetCombinedCollisionResponse(materialA, materialB);
 
             // Skip if any of them is marked with a "None" collision response
             if (combinedCollisionResponse == CollisionResponsePolicy.None)
@@ -137,6 +138,47 @@ namespace Unity.Physics
                 return;
             }
 
+            // Swap the order if A is larger than B
+            // TODO: Make this more precise perhaps
+            bool isALargerThanB = (voxelA->m_Sectors.Count > voxelB->m_Sectors.Count);
+            if (isALargerThanB)
+            {
+                _VoxelVoxel(
+                    context,
+                    voxelB,
+                    voxelA,
+                    materialB,
+                    materialA,
+                    worldFromB,
+                    worldFromA,
+                    maxDistance,
+                    !flipped);
+                return;
+            }
+
+            _VoxelVoxel(
+                context,
+                voxelA,
+                voxelB,
+                materialA,
+                materialB,
+                worldFromB,
+                worldFromA,
+                maxDistance,
+                !flipped);
+        }
+
+        private static unsafe void _VoxelVoxel(
+            Context context,
+            VoxelCollider* voxelA,
+            VoxelCollider* voxelB,
+            Material materialA,
+            Material materialB,
+            [NoAlias] in MTransform worldFromA,
+            [NoAlias] in MTransform worldFromB,
+            float maxDistance,
+            bool flipped)
+        {
             MTransform bFromA = Mul(Inverse(worldFromB), worldFromA);
 
             var contacts = new UnsafeList<VoxelContact>(256, Allocator.Temp);
@@ -144,6 +186,7 @@ namespace Unity.Physics
             WriteVoxelManifolds(contacts, context, worldFromB, materialA, materialB, flipped);
             contacts.Dispose();
         }
+            
 
         private static bool ApplyNormalMasking(
             float3 delta, PhysicsInfo infoA, PhysicsInfo infoB, MTransform bFromA,
@@ -555,7 +598,7 @@ namespace Unity.Physics
                     BodyIndices = context.BodyIndices,
                     VoxelCoordsInA = flipped ? contact.VoxelB : contact.VoxelA,
                     VoxelCoordsInB = flipped ? contact.VoxelA : contact.VoxelB,
-                    Normal = math.mul(worldFromB.Rotation, contact.NormalInB),
+                    Normal = (flipped ? -1.0f : 1.0f) * math.mul(worldFromB.Rotation, contact.NormalInB),
                     Distance = contact.Distance,
                     DebugFlags = debugFlags,
                     isPhysicsContact = true,

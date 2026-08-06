@@ -504,18 +504,29 @@ namespace Unity.Physics
 
             if (input.World.NumDynamicBodies == 0)
             {
-                // No need to do anything, since nothing can move
-                m_StepHandles = new SimulationJobHandles(handle);
+                // There is no simulation work, but static-static broadphase overlaps are still generated.
+                handle = input.World.CollisionWorld.ScheduleStaticVsStaticOverlapsJob(
+                    out NativeStream staticVsStaticOnlyBodyPairs, handle);
+                m_StepHandles = new SimulationJobHandles(handle)
+                {
+                    FinalDisposeHandle = staticVsStaticOnlyBodyPairs.Dispose(handle)
+                };
                 return m_StepHandles;
             }
 
             // Find all body pairs that overlap in the broadphase
+            // StaticVsStatic is only needed for alien propagation.
+            // This is a dumb workaround, and should be replaced by proper caching.
             var handles = input.World.CollisionWorld.ScheduleFindOverlapsJobsInternal(
                 out NativeStream dynamicVsDynamicBodyPairs, out NativeStream dynamicVsStaticBodyPairs,
+                out NativeStream staticVsStaticBodyPairs,
                 handle, multiThreaded, incrementalDynamicBroadphase, incrementalStaticBroadphase);
             handle = handles.FinalExecutionHandle;
             var disposeHandle = handles.FinalDisposeHandle;
             var postOverlapsHandle = handle;
+            
+            // TODO: Consume the staticVsStatic stream here.
+            var staticVsStaticDisposeHandle = staticVsStaticBodyPairs.Dispose(postOverlapsHandle);
 
             // Sort all overlapping and jointed body pairs into phases
             handles = DispatchPairSequencer.ScheduleCreatePhasedDispatchPairsJob(input,
@@ -524,7 +535,8 @@ namespace Unity.Physics
 
             StepContext.CreateDispatchPairsJobHandle = handles.FinalExecutionHandle;
 
-            m_StepHandles.FinalDisposeHandle = JobHandle.CombineDependencies(handles.FinalDisposeHandle, disposeHandle);
+            m_StepHandles.FinalDisposeHandle = JobHandle.CombineDependencies(
+                handles.FinalDisposeHandle, disposeHandle, staticVsStaticDisposeHandle);
             m_StepHandles.FinalExecutionHandle = multiThreaded ?
                 JobHandle.CombineDependencies(handles.FinalExecutionHandle, postOverlapsHandle) : handles.FinalExecutionHandle;
 

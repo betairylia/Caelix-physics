@@ -668,10 +668,18 @@ namespace Unity.Physics
         }
 
         internal SimulationJobHandles ScheduleFindOverlapsJobsInternal(out NativeStream dynamicVsDynamicPairsStream, out NativeStream staticVsDynamicPairsStream,
+            out NativeStream staticVsStaticPairsStream,
             JobHandle inputDeps, bool multiThreaded, bool incrementalDynamicBroadphase, bool incrementalStaticBroadphase)
         {
-            return Broadphase.ScheduleFindOverlapsJobs(out dynamicVsDynamicPairsStream, out staticVsDynamicPairsStream, inputDeps, multiThreaded, incrementalDynamicBroadphase, incrementalStaticBroadphase);
+            var handles = Broadphase.ScheduleFindOverlapsJobs(out dynamicVsDynamicPairsStream, out staticVsDynamicPairsStream,
+                inputDeps, multiThreaded, incrementalDynamicBroadphase, incrementalStaticBroadphase);
+            handles.FinalExecutionHandle = Broadphase.ScheduleStaticVsStaticOverlapsJob(
+                out staticVsStaticPairsStream, handles.FinalExecutionHandle);
+            return handles;
         }
+
+        internal JobHandle ScheduleStaticVsStaticOverlapsJob(out NativeStream staticVsStaticPairsStream, JobHandle inputDeps) =>
+            Broadphase.ScheduleStaticVsStaticOverlapsJob(out staticVsStaticPairsStream, inputDeps);
 
         /// <summary>   Synchronize the collision world with the dynamics world. </summary>
         ///
