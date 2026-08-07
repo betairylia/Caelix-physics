@@ -459,7 +459,7 @@ namespace Unity.Physics
 
                 // Cull A sectors that cannot reach B at all.
                 float3 sectorCenterInB = Mul(bFromA, (float3)sectorOriginA + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
-                float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS) * rowAbsSum;
+                float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS + Broadphase.GlobalAabbMargin) * rowAbsSum;
                 float3 sectorDelta = math.abs(sectorCenterInB - boundsCenterB);
                 if (math.any(sectorDelta > sectorHalfExtentInB + boundsHalfB + windowHalfWidth))
                 {
@@ -533,7 +533,9 @@ namespace Unity.Physics
             ref UnsafeHashSet<int3> overlapped)
         {
             float3 centerInB = Mul(bFromA, (float3)brickOriginBlocksA + 0.5f * Sector.SIZE_IN_BLOCKS);
-            float3 halfExtent = (0.5f * Sector.SIZE_IN_BLOCKS - 0.5f) * rowAbsSum + windowHalfWidth;
+            
+            // For alien propagation to work properly, windowHalfWidth must be larger than 1.0.
+            float3 halfExtent = (0.5f * Sector.SIZE_IN_BLOCKS - 0.5f) * rowAbsSum + math.max(1.0f, windowHalfWidth);
 
             // B cells whose centers can lie inside the dilated cloud, then the bricks holding
             // them (arithmetic shifts floor-divide correctly for negative coords).
