@@ -41,13 +41,15 @@ namespace Unity.Physics
             public bool BothMotionsAreKinematic;
             public NativeStream.Writer* ContactWriter;  // cannot be passed by value
             public NativeStream.Writer* VoxelContactWriter;  // cannot be passed by value
+            public NativeStream.Writer* VoxelBrickOverlapWriter;  // cannot be passed by value
             public float ScaleA;
             public float ScaleB;
         }
 
         // Write a set of contact manifolds for a pair of bodies to the given stream.
         public static unsafe void BodyBody(in RigidBody rigidBodyA, in RigidBody rigidBodyB, in MotionVelocity motionVelocityA, in MotionVelocity motionVelocityB,
-            float collisionTolerance, float timeStep, BodyIndexPair pair, ref NativeStream.Writer contactWriter, ref NativeStream.Writer voxelContactWriter)
+            float collisionTolerance, float timeStep, BodyIndexPair pair, ref NativeStream.Writer contactWriter, ref NativeStream.Writer voxelContactWriter,
+            ref NativeStream.Writer voxelBrickOverlapWriter)
         {
             var colliderA = (Collider*)rigidBodyA.Collider.GetUnsafePtr();
             var colliderB = (Collider*)rigidBodyB.Collider.GetUnsafePtr();
@@ -76,6 +78,7 @@ namespace Unity.Physics
                 BothMotionsAreKinematic = motionVelocityA.IsKinematic && motionVelocityB.IsKinematic,
                 ContactWriter = (NativeStream.Writer*)UnsafeUtility.AddressOf(ref contactWriter),
                 VoxelContactWriter = (NativeStream.Writer*)UnsafeUtility.AddressOf(ref voxelContactWriter),
+                VoxelBrickOverlapWriter = (NativeStream.Writer*)UnsafeUtility.AddressOf(ref voxelBrickOverlapWriter),
                 ScaleA = rigidBodyA.Scale,
                 ScaleB = rigidBodyB.Scale
             };

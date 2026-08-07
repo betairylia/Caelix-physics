@@ -28,6 +28,8 @@ namespace Unity.Physics
         internal NativeStream TriggerEventDataStream;
         internal NativeStream ImpulseEventDataStream;
         internal NativeStream VoxelContactDataStream;
+        internal NativeStream VoxelBrickOverlapCandidateStream;
+        internal NativeStream StaticVoxelBrickOverlapCandidateStream;
 
         /// <summary>   Gets the collision events. </summary>
         ///
@@ -48,6 +50,14 @@ namespace Unity.Physics
         ///
         /// <value> The voxel contact events. </value>
         public VoxelContactEvents VoxelContactEvents => new VoxelContactEvents(VoxelContactDataStream);
+
+        /// <summary>
+        /// Gets the raw voxel brick-overlap candidates of the last step (dynamic and
+        /// static-static streams presented as one logical sequence). Valid after the step's
+        /// FinalExecutionHandle completes and until the next simulation reset or disposal.
+        /// </summary>
+        public VoxelBrickOverlapCandidates VoxelBrickOverlapCandidates =>
+            new VoxelBrickOverlapCandidates(VoxelBrickOverlapCandidateStream, StaticVoxelBrickOverlapCandidateStream);
 
         internal bool ReadyForEventScheduling => m_InputVelocities.IsCreated && CollisionEventDataStream.IsCreated && TriggerEventDataStream.IsCreated && ImpulseEventDataStream.IsCreated && VoxelContactDataStream.IsCreated;
 
@@ -108,12 +118,22 @@ namespace Unity.Physics
             {
                 VoxelContactDataStream.Dispose();
             }
+            if (VoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                VoxelBrickOverlapCandidateStream.Dispose();
+            }
+            if (StaticVoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                StaticVoxelBrickOverlapCandidateStream.Dispose();
+            }
 
             {
                 CollisionEventDataStream = new NativeStream(1, Allocator.Persistent);
                 TriggerEventDataStream = new NativeStream(1, Allocator.Persistent);
                 ImpulseEventDataStream = new NativeStream(1, Allocator.Persistent);
                 VoxelContactDataStream = new NativeStream(1, Allocator.Persistent);
+                VoxelBrickOverlapCandidateStream = new NativeStream(1, Allocator.Persistent);
+                StaticVoxelBrickOverlapCandidateStream = new NativeStream(1, Allocator.Persistent);
             }
         }
 
@@ -162,11 +182,22 @@ namespace Unity.Physics
             {
                 handle = ImpulseEventDataStream.Dispose(handle);
             }
-            // Note: VoxelContactDataStream is reconstructed by NarrowPhase.ScheduleCreateContactsJobs,
-            // so it only needs to be released here.
+            // Note: VoxelContactDataStream and VoxelBrickOverlapCandidateStream are reconstructed
+            // by NarrowPhase.ScheduleCreateContactsJobs, and StaticVoxelBrickOverlapCandidateStream
+            // by the broadphase static-static consumer, so they only need to be released here.
+            // In a world with zero dynamic bodies the narrowphase never runs, so the first two
+            // stay uncreated for that step; readers must treat uncreated streams as empty.
             if (VoxelContactDataStream.IsCreated)
             {
                 handle = VoxelContactDataStream.Dispose(handle);
+            }
+            if (VoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                handle = VoxelBrickOverlapCandidateStream.Dispose(handle);
+            }
+            if (StaticVoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                handle = StaticVoxelBrickOverlapCandidateStream.Dispose(handle);
             }
 
             return handle;
@@ -205,6 +236,16 @@ namespace Unity.Physics
             if (VoxelContactDataStream.IsCreated)
             {
                 VoxelContactDataStream.Dispose();
+            }
+
+            if (VoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                VoxelBrickOverlapCandidateStream.Dispose();
+            }
+
+            if (StaticVoxelBrickOverlapCandidateStream.IsCreated)
+            {
+                StaticVoxelBrickOverlapCandidateStream.Dispose();
             }
         }
     }
@@ -282,6 +323,12 @@ namespace Unity.Physics
         /// <value> The voxel contact events. </value>
         public VoxelContactEvents VoxelContactEvents => SimulationContext.VoxelContactEvents;
 
+        /// <summary>
+        /// Gets the raw voxel brick-overlap candidates of the last step. Valid after
+        /// FinalExecutionHandle completes and until the next simulation reset or disposal.
+        /// </summary>
+        public VoxelBrickOverlapCandidates VoxelBrickOverlapCandidates => SimulationContext.VoxelBrickOverlapCandidates;
+
         internal SimulationContext SimulationContext;
 
         internal SimulationJobHandles m_StepHandles;
@@ -353,15 +400,21 @@ namespace Unity.Physics
 
             var contacts = new NativeStream(solverSchedulerInfo.NumIterativeWorkItems.Value, Allocator.Temp);
 
-            // Voxel contacts are written during contact creation, so the stream has to be grown to the
-            // narrowphase work item count before the contacts below are created (the event streams are
-            // only grown further down, since they are not written until the solver runs).
+            // Voxel contacts and brick-overlap candidates are written during contact creation, so the
+            // streams have to be grown to the narrowphase work item count before the contacts below are
+            // created (the event streams are only grown further down, since they are not written until
+            // the solver runs).
             {
                 var contactWorkItemCount = solverSchedulerInfo.NumIterativeWorkItems.Value;
                 if (simulationContext.VoxelContactDataStream.IsCreated && simulationContext.VoxelContactDataStream.ForEachCount < contactWorkItemCount)
                 {
                     simulationContext.VoxelContactDataStream.Dispose();
                     simulationContext.VoxelContactDataStream = new NativeStream(contactWorkItemCount, Allocator.Persistent);
+                }
+                if (simulationContext.VoxelBrickOverlapCandidateStream.IsCreated && simulationContext.VoxelBrickOverlapCandidateStream.ForEachCount < contactWorkItemCount)
+                {
+                    simulationContext.VoxelBrickOverlapCandidateStream.Dispose();
+                    simulationContext.VoxelBrickOverlapCandidateStream = new NativeStream(contactWorkItemCount, Allocator.Persistent);
                 }
             }
 
@@ -374,9 +427,10 @@ namespace Unity.Physics
 
                     var contactsWriter = contacts.AsWriter();
                     var voxelContactsWriter = simulationContext.VoxelContactDataStream.AsWriter();
+                    var voxelBrickOverlapWriter = simulationContext.VoxelBrickOverlapCandidateStream.AsWriter();
                     NarrowPhase.CreateContacts(ref input.World, simulationContext.InputVelocities,
                         dispatchPairs.AsArray(), ref solverSchedulerInfo, input.TimeStep, ref contactsWriter,
-                        ref voxelContactsWriter); //Frame timestep
+                        ref voxelContactsWriter, ref voxelBrickOverlapWriter); //Frame timestep
                 }
                 else // Using substeps
                 {
@@ -387,9 +441,10 @@ namespace Unity.Physics
 
                     var contactsWriter = contacts.AsWriter();
                     var voxelContactsWriter = simulationContext.VoxelContactDataStream.AsWriter();
+                    var voxelBrickOverlapWriter = simulationContext.VoxelBrickOverlapCandidateStream.AsWriter();
                     NarrowPhase.CreateContacts(ref input.World, copyInputVelocities,
                         dispatchPairs.AsArray(), ref solverSchedulerInfo, input.TimeStep, ref contactsWriter,
-                        ref voxelContactsWriter); //Frame timestep
+                        ref voxelContactsWriter, ref voxelBrickOverlapWriter); //Frame timestep
                     copyInputVelocities.Dispose();
 
                     // Integrate gravity using substep timestep
@@ -504,9 +559,19 @@ namespace Unity.Physics
 
             if (input.World.NumDynamicBodies == 0)
             {
-                // There is no simulation work, but static-static broadphase overlaps are still generated.
+                // There is no simulation work, but static-static broadphase overlaps are still
+                // generated and consumed into brick-overlap candidates, so the overlap graph
+                // also exists in a world with no dynamic bodies.
                 handle = input.World.CollisionWorld.ScheduleStaticVsStaticOverlapsJob(
                     out NativeStream staticVsStaticOnlyBodyPairs, handle);
+                SimulationContext.StaticVoxelBrickOverlapCandidateStream = new NativeStream(1, Allocator.Persistent);
+                handle = new CreateStaticVoxelBrickOverlapCandidatesJob
+                {
+                    Bodies = input.World.CollisionWorld.Bodies,
+                    PairStream = staticVsStaticOnlyBodyPairs,
+                    CollisionTolerance = input.World.CollisionWorld.CollisionTolerance,
+                    CandidateWriter = SimulationContext.StaticVoxelBrickOverlapCandidateStream.AsWriter()
+                }.Schedule(handle);
                 m_StepHandles = new SimulationJobHandles(handle)
                 {
                     FinalDisposeHandle = staticVsStaticOnlyBodyPairs.Dispose(handle)
@@ -524,9 +589,18 @@ namespace Unity.Physics
             handle = handles.FinalExecutionHandle;
             var disposeHandle = handles.FinalDisposeHandle;
             var postOverlapsHandle = handle;
-            
-            // TODO: Consume the staticVsStatic stream here.
-            var staticVsStaticDisposeHandle = staticVsStaticBodyPairs.Dispose(postOverlapsHandle);
+
+            // Consume the static-static stream into brick-overlap candidates (marking only:
+            // no contacts, no solver work), then release the pair stream.
+            SimulationContext.StaticVoxelBrickOverlapCandidateStream = new NativeStream(1, Allocator.Persistent);
+            var staticConsumeHandle = new CreateStaticVoxelBrickOverlapCandidatesJob
+            {
+                Bodies = input.World.CollisionWorld.Bodies,
+                PairStream = staticVsStaticBodyPairs,
+                CollisionTolerance = input.World.CollisionWorld.CollisionTolerance,
+                CandidateWriter = SimulationContext.StaticVoxelBrickOverlapCandidateStream.AsWriter()
+            }.Schedule(postOverlapsHandle);
+            var staticVsStaticDisposeHandle = staticVsStaticBodyPairs.Dispose(staticConsumeHandle);
 
             // Sort all overlapping and jointed body pairs into phases
             handles = DispatchPairSequencer.ScheduleCreatePhasedDispatchPairsJob(input,
@@ -537,8 +611,11 @@ namespace Unity.Physics
 
             m_StepHandles.FinalDisposeHandle = JobHandle.CombineDependencies(
                 handles.FinalDisposeHandle, disposeHandle, staticVsStaticDisposeHandle);
+            // The static-static candidate consumer joins the final execution handle so the
+            // candidate streams are complete when the step's final handle completes.
             m_StepHandles.FinalExecutionHandle = multiThreaded ?
-                JobHandle.CombineDependencies(handles.FinalExecutionHandle, postOverlapsHandle) : handles.FinalExecutionHandle;
+                JobHandle.CombineDependencies(handles.FinalExecutionHandle, postOverlapsHandle, staticConsumeHandle) :
+                JobHandle.CombineDependencies(handles.FinalExecutionHandle, staticConsumeHandle);
 
             return m_StepHandles;
         }
@@ -572,7 +649,8 @@ namespace Unity.Physics
                 m_StepHandles = NarrowPhase.ScheduleCreateContactsJobs(ref input.World, input.TimeStep,
                     SimulationContext.InputVelocities, ref StepContext.Contacts, ref StepContext.Jacobians,
                     ref StepContext.PhasedDispatchPairs, handle, ref StepContext.SolverSchedulerInfo,
-                    ref SimulationContext.VoxelContactDataStream, multiThreaded);
+                    ref SimulationContext.VoxelContactDataStream,
+                    ref SimulationContext.VoxelBrickOverlapCandidateStream, multiThreaded);
             }
             else // Using substeps
             {
@@ -585,7 +663,8 @@ namespace Unity.Physics
                 // Create contacts using the velocity prediction data for the full frame timestep
                 m_StepHandles = NarrowPhase.ScheduleCreateContactsJobs(ref input.World, input.TimeStep, copyInputVelocities,
                     ref StepContext.Contacts, ref StepContext.Jacobians, ref StepContext.PhasedDispatchPairs, handle,
-                    ref StepContext.SolverSchedulerInfo, ref SimulationContext.VoxelContactDataStream, multiThreaded);
+                    ref StepContext.SolverSchedulerInfo, ref SimulationContext.VoxelContactDataStream,
+                    ref SimulationContext.VoxelBrickOverlapCandidateStream, multiThreaded);
 
                 var copyHandle = copyInputVelocities.Dispose(m_StepHandles.FinalExecutionHandle);
                 m_StepHandles.FinalExecutionHandle = JobHandle.CombineDependencies(copyHandle, m_StepHandles.FinalExecutionHandle);
