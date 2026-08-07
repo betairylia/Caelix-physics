@@ -579,9 +579,8 @@ namespace Unity.Physics
                 return m_StepHandles;
             }
 
-            // Find all body pairs that overlap in the broadphase
-            // StaticVsStatic is only needed for alien propagation.
-            // This is a dumb workaround, and should be replaced by proper caching.
+            // Find all body pairs that overlap in the broadphase.
+            // The StaticVsStatic stream feeds the brick-overlap candidate consumer below.
             var handles = input.World.CollisionWorld.ScheduleFindOverlapsJobsInternal(
                 out NativeStream dynamicVsDynamicBodyPairs, out NativeStream dynamicVsStaticBodyPairs,
                 out NativeStream staticVsStaticBodyPairs,
