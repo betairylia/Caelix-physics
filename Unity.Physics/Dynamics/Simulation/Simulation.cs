@@ -52,9 +52,9 @@ namespace Unity.Physics
         public VoxelContactEvents VoxelContactEvents => new VoxelContactEvents(VoxelContactDataStream);
 
         /// <summary>
-        /// Gets the raw voxel brick-overlap candidates of the last step (dynamic and
-        /// static-static streams presented as one logical sequence). Valid after the step's
-        /// FinalExecutionHandle completes and until the next simulation reset or disposal.
+        /// Gets the raw voxel brick-overlap candidate streams of the last step. Valid after
+        /// the step's FinalExecutionHandle completes and until the next simulation reset or
+        /// disposal.
         /// </summary>
         public VoxelBrickOverlapCandidates VoxelBrickOverlapCandidates =>
             new VoxelBrickOverlapCandidates(VoxelBrickOverlapCandidateStream, StaticVoxelBrickOverlapCandidateStream);

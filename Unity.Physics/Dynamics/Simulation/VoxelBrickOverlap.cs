@@ -13,8 +13,9 @@ namespace Unity.Physics
     /// configured contact/halo window, not that individual occupied blocks intersect.
     ///
     /// Brick coordinates are global brick coordinates in each collider's local voxel grid,
-    /// including sector offsets. Raw candidates are unsorted and may contain duplicates.
-    /// Body indices are only valid for the step that produced them.
+    /// including sector offsets. Raw candidates are unsorted, but the producer emits each
+    /// physical brick pair exactly once. Body indices are only valid for the step that produced
+    /// them.
     /// </summary>
     public struct VoxelBrickOverlapCandidate
     {
@@ -38,13 +39,12 @@ namespace Unity.Physics
     }
 
     /// <summary>
-    /// Burst-compatible view over the raw brick-overlap candidate streams of one step.
-    /// Internally this traverses the dynamic-pair stream and the static-static stream;
-    /// enumeration presents them as one logical sequence.
+    /// Burst-compatible view over the raw dynamic-pair and static-static brick-overlap
+    /// candidate streams of one step.
     ///
     /// The view is valid after the step's FinalExecutionHandle completes and until the next
     /// simulation reset or disposal. Either stream may be uncreated (for example the dynamic
-    /// stream in a world with zero dynamic bodies); the view treats it as empty.
+    /// stream in a world with zero dynamic bodies); <see cref="Count"/> treats it as empty.
     /// </summary>
     public struct VoxelBrickOverlapCandidates
     {
@@ -70,65 +70,6 @@ namespace Unity.Physics
         {
             return (m_DynamicStream.IsCreated ? m_DynamicStream.Count() : 0)
                 + (m_StaticStream.IsCreated ? m_StaticStream.Count() : 0);
-        }
-
-        public Enumerator GetEnumerator() => new Enumerator(m_DynamicStream, m_StaticStream);
-
-        public struct Enumerator
-        {
-            NativeStream.Reader m_Reader;
-            readonly NativeStream m_StaticStream;
-            int m_CurrentWorkItem;
-            int m_NumWorkItems;
-            bool m_StaticPhasePending;
-
-            public VoxelBrickOverlapCandidate Current { get; private set; }
-
-            internal Enumerator(NativeStream dynamicStream, NativeStream staticStream)
-            {
-                m_StaticStream = staticStream;
-                m_StaticPhasePending = staticStream.IsCreated;
-                m_Reader = dynamicStream.IsCreated ? dynamicStream.AsReader() : default;
-                m_NumWorkItems = dynamicStream.IsCreated ? dynamicStream.ForEachCount : 0;
-                m_CurrentWorkItem = 0;
-                Current = default;
-                AdvanceReader();
-            }
-
-            public bool MoveNext()
-            {
-                if (m_Reader.RemainingItemCount > 0)
-                {
-                    Current = m_Reader.Read<VoxelBrickOverlapCandidate>();
-                    AdvanceReader();
-                    return true;
-                }
-                return false;
-            }
-
-            void AdvanceReader()
-            {
-                while (m_Reader.RemainingItemCount == 0)
-                {
-                    if (m_CurrentWorkItem < m_NumWorkItems)
-                    {
-                        m_Reader.BeginForEachIndex(m_CurrentWorkItem);
-                        m_CurrentWorkItem++;
-                        continue;
-                    }
-
-                    if (m_StaticPhasePending)
-                    {
-                        m_StaticPhasePending = false;
-                        m_Reader = m_StaticStream.AsReader();
-                        m_NumWorkItems = m_StaticStream.ForEachCount;
-                        m_CurrentWorkItem = 0;
-                        continue;
-                    }
-
-                    return;
-                }
-            }
         }
     }
 
@@ -213,6 +154,7 @@ namespace Unity.Physics
             // Same size-based role swap as the dynamic VoxelVoxel path, so both paths walk
             // the smaller body's bricks. Flipped keeps the emitted coordinates on the
             // original bodies.
+            // TODO: Warp this so a single source-of-truth for cost estimation.
             bool swap = voxelA->m_Sectors.Count > voxelB->m_Sectors.Count;
             if (swap)
             {
