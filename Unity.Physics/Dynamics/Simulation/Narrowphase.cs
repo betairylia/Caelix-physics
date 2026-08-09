@@ -19,12 +19,10 @@ namespace Unity.Physics
         /// <param name="timeStep">             The time step for the full frame. </param>
         /// <param name="contactsWriter">       [in,out] The contacts writer. </param>
         /// <param name="voxelContactWriter">   [in,out] The voxel contact writer. </param>
-        /// <param name="voxelBrickOverlapWriter"> [in,out] The voxel brick-overlap candidate writer. </param>
         internal static void CreateContacts(ref PhysicsWorld world, NativeArray<Velocity> inputVelocities,
             NativeArray<DispatchPairSequencer.DispatchPair> dispatchPairs,
             ref DispatchPairSequencer.SolverSchedulerInfo solverSchedulerInfo, float timeStep,
-            ref NativeStream.Writer contactsWriter, ref NativeStream.Writer voxelContactWriter,
-            ref NativeStream.Writer voxelBrickOverlapWriter)
+            ref NativeStream.Writer contactsWriter, ref NativeStream.Writer voxelContactWriter)
         {
             // pure iterative pairs:
             if (solverSchedulerInfo.IterativePairsIterativeScheduling.NumDispatchPairs.Value > 0)
@@ -32,7 +30,7 @@ namespace Unity.Physics
                 ParallelCreateContactsJob.ExecuteImpl(ref world, inputVelocities, timeStep, dispatchPairs,
                     solverSchedulerInfo.IterativePairsIterativeScheduling.FirstDispatchPairIndex.Value,
                     solverSchedulerInfo.IterativePairsIterativeScheduling.NumDispatchPairs.Value, ref contactsWriter,
-                    ref voxelContactWriter, ref voxelBrickOverlapWriter,
+                    ref voxelContactWriter,
                     solverSchedulerInfo.IterativePairsIterativeScheduling.FirstWorkItemIndex.Value);
             }
 
@@ -42,7 +40,7 @@ namespace Unity.Physics
                 ParallelCreateContactsJob.ExecuteImpl(ref world, inputVelocities, timeStep, dispatchPairs,
                     solverSchedulerInfo.CouplingPairsIterativeScheduling.FirstDispatchPairIndex.Value,
                     solverSchedulerInfo.CouplingPairsIterativeScheduling.NumDispatchPairs.Value, ref contactsWriter,
-                    ref voxelContactWriter, ref voxelBrickOverlapWriter,
+                    ref voxelContactWriter,
                     solverSchedulerInfo.CouplingPairsIterativeScheduling.FirstWorkItemIndex.Value);
             }
 
@@ -52,7 +50,7 @@ namespace Unity.Physics
                 ParallelCreateContactsJob.ExecuteImpl(ref world, inputVelocities, timeStep, dispatchPairs,
                     solverSchedulerInfo.DirectPairsIterativeScheduling.FirstDispatchPairIndex.Value,
                     solverSchedulerInfo.DirectPairsIterativeScheduling.NumDispatchPairs.Value, ref contactsWriter,
-                    ref voxelContactWriter, ref voxelBrickOverlapWriter,
+                    ref voxelContactWriter,
                     solverSchedulerInfo.DirectPairsIterativeScheduling.FirstWorkItemIndex.Value);
             }
         }
@@ -78,20 +76,17 @@ namespace Unity.Physics
             NativeArray<Velocity> inputVelocities, ref NativeStream contacts, ref NativeStream jacobians,
             ref NativeList<DispatchPairSequencer.DispatchPair> dispatchPairs, JobHandle inputDeps,
             ref DispatchPairSequencer.SolverSchedulerInfo solverSchedulerInfo, ref NativeStream voxelContactDataStream,
-            ref NativeStream voxelBrickOverlapCandidateStream, bool multiThreaded = true)
+            bool multiThreaded = true)
         {
             SimulationJobHandles returnHandles = default;
 
             var numWorkItems = solverSchedulerInfo.NumIterativeWorkItems;
             var contactsHandle = NativeStream.ScheduleConstruct(out contacts, numWorkItems, inputDeps, Allocator.TempJob);
             var jacobiansHandle = NativeStream.ScheduleConstruct(out jacobians, numWorkItems, inputDeps, Allocator.TempJob);
-            // Voxel contacts and brick-overlap candidates are written alongside the regular contacts,
-            // so their streams need the same work item count and the same construction dependency as
-            // the contact stream.
+            // Voxel contacts are written alongside the regular contacts, so the stream needs the same
+            // work item count and the same construction dependency as the contact stream.
             var voxelContactsHandle = NativeStream.ScheduleConstruct(out voxelContactDataStream, numWorkItems, inputDeps, Allocator.Persistent);
-            var voxelBrickOverlapHandle = NativeStream.ScheduleConstruct(out voxelBrickOverlapCandidateStream, numWorkItems, inputDeps, Allocator.Persistent);
-            var streamConstructionHandle = JobHandle.CombineDependencies(
-                JobHandle.CombineDependencies(contactsHandle, jacobiansHandle, voxelContactsHandle), voxelBrickOverlapHandle);
+            var streamConstructionHandle = JobHandle.CombineDependencies(contactsHandle, jacobiansHandle, voxelContactsHandle);
 
             if (!multiThreaded)
             {
@@ -103,8 +98,7 @@ namespace Unity.Physics
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
                     SolverSchedulerInfo = solverSchedulerInfo,
                     ContactsWriter = contacts.AsWriter(),
-                    VoxelContactWriter = voxelContactDataStream.AsWriter(),
-                    VoxelBrickOverlapWriter = voxelBrickOverlapCandidateStream.AsWriter()
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.Schedule(streamConstructionHandle);
             }
             else
@@ -117,8 +111,7 @@ namespace Unity.Physics
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
                     IterativeSolverSchedulerInfo = solverSchedulerInfo.IterativePairsIterativeScheduling,
                     ContactsWriter = contacts.AsWriter(),
-                    VoxelContactWriter = voxelContactDataStream.AsWriter(),
-                    VoxelBrickOverlapWriter = voxelBrickOverlapCandidateStream.AsWriter()
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.ScheduleUnsafeIndex0(solverSchedulerInfo.IterativePairsIterativeScheduling.NumWorkItems, 1, streamConstructionHandle);
 
                 var createContactsJobIterativeCoupling = new ParallelCreateContactsJob
@@ -129,8 +122,7 @@ namespace Unity.Physics
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
                     IterativeSolverSchedulerInfo = solverSchedulerInfo.CouplingPairsIterativeScheduling,
                     ContactsWriter = contacts.AsWriter(),
-                    VoxelContactWriter = voxelContactDataStream.AsWriter(),
-                    VoxelBrickOverlapWriter = voxelBrickOverlapCandidateStream.AsWriter()
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.ScheduleUnsafeIndex0(solverSchedulerInfo.CouplingPairsIterativeScheduling.NumWorkItems, 1, streamConstructionHandle);
 
                 var createContactsJobIterativeDirect = new ParallelCreateContactsJob
@@ -141,8 +133,7 @@ namespace Unity.Physics
                     DispatchPairs = dispatchPairs.AsDeferredJobArray(),
                     IterativeSolverSchedulerInfo = solverSchedulerInfo.DirectPairsIterativeScheduling,
                     ContactsWriter = contacts.AsWriter(),
-                    VoxelContactWriter = voxelContactDataStream.AsWriter(),
-                    VoxelBrickOverlapWriter = voxelBrickOverlapCandidateStream.AsWriter()
+                    VoxelContactWriter = voxelContactDataStream.AsWriter()
                 }.ScheduleUnsafeIndex0(solverSchedulerInfo.DirectPairsIterativeScheduling.NumWorkItems, 1, streamConstructionHandle);
 
                 returnHandles.FinalExecutionHandle = JobHandle.CombineDependencies(createContactsJobIterative,
@@ -162,7 +153,6 @@ namespace Unity.Physics
             [ReadOnly] public NativeArray<DispatchPairSequencer.DispatchPair> DispatchPairs;
             [NoAlias, NativeDisableContainerSafetyRestriction] public NativeStream.Writer ContactsWriter;
             [NoAlias, NativeDisableContainerSafetyRestriction] public NativeStream.Writer VoxelContactWriter;
-            [NoAlias, NativeDisableContainerSafetyRestriction] public NativeStream.Writer VoxelBrickOverlapWriter;
             [NoAlias, ReadOnly] public DispatchPairSequencer.IterativeSolverSchedulerInfo IterativeSolverSchedulerInfo;
 
             public void Execute(int workItemIndexOffset)
@@ -172,19 +162,17 @@ namespace Unity.Physics
                 var workItemIndex = IterativeSolverSchedulerInfo.FirstWorkItemIndex.Value + workItemIndexOffset;
 
                 ExecuteImpl(ref World, InputVelocities, TimeStep, DispatchPairs, firstDispatchPairIndex, numPairsToRead,
-                    ref ContactsWriter, ref VoxelContactWriter, ref VoxelBrickOverlapWriter, workItemIndex);
+                    ref ContactsWriter, ref VoxelContactWriter, workItemIndex);
             }
 
             // Note: timestep needs to be for full frame
             internal static void ExecuteImpl(ref PhysicsWorld world, NativeArray<Velocity> inputVelocities,
                 float timeStep, NativeArray<DispatchPairSequencer.DispatchPair> dispatchPairs,
                 int firstDispatchPairIndex, int numDispatchPairs, ref NativeStream.Writer contactWriter,
-                ref NativeStream.Writer voxelContactWriter, ref NativeStream.Writer voxelBrickOverlapWriter,
-                int workItemIndex)
+                ref NativeStream.Writer voxelContactWriter, int workItemIndex)
             {
                 contactWriter.BeginForEachIndex(workItemIndex);
                 voxelContactWriter.BeginForEachIndex(workItemIndex);
-                voxelBrickOverlapWriter.BeginForEachIndex(workItemIndex);
 
                 for (int i = 0; i < numDispatchPairs; i++)
                 {
@@ -247,14 +235,13 @@ namespace Unity.Physics
 
                             ManifoldQueries.BodyBody(rigidBodyA, rigidBodyB, motionVelocityA, motionVelocityB,
                                 world.CollisionWorld.CollisionTolerance, timeStep, pair, ref contactWriter,
-                                ref voxelContactWriter, ref voxelBrickOverlapWriter);
+                                ref voxelContactWriter);
                         }
                     }
                 }
 
                 contactWriter.EndForEachIndex();
                 voxelContactWriter.EndForEachIndex();
-                voxelBrickOverlapWriter.EndForEachIndex();
             }
         }
 
@@ -269,12 +256,11 @@ namespace Unity.Physics
             [ReadOnly] public DispatchPairSequencer.SolverSchedulerInfo SolverSchedulerInfo;
             [NoAlias] public NativeStream.Writer ContactsWriter;
             [NoAlias] public NativeStream.Writer VoxelContactWriter;
-            [NoAlias] public NativeStream.Writer VoxelBrickOverlapWriter;
 
             public void Execute()
             {
                 CreateContacts(ref World, InputVelocities, DispatchPairs, ref SolverSchedulerInfo, TimeStep,
-                    ref ContactsWriter, ref VoxelContactWriter, ref VoxelBrickOverlapWriter);
+                    ref ContactsWriter, ref VoxelContactWriter);
             }
         }
     }

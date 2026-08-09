@@ -18,9 +18,6 @@ namespace Unity.Physics
     [NoAlias]
     struct Broadphase : IDisposable
     {
-        // Fixed per-body padding used only by broadphase BVHs.
-        internal const float GlobalAabbMargin = 0.25f;
-
         internal struct OverlapResult
         {
             public BodyIndexPair BodyPair;
@@ -469,17 +466,6 @@ namespace Unity.Physics
             returnHandles.FinalExecutionHandle = JobHandle.CombineDependencies(dynamicVsDynamicHandle, staticVsDynamicHandle);
 
             return returnHandles;
-        }
-
-        internal JobHandle ScheduleStaticVsStaticOverlapsJob(out NativeStream staticVsStaticPairsStream, JobHandle inputDeps)
-        {
-            staticVsStaticPairsStream = new NativeStream(1, Allocator.TempJob);
-            return new StaticVsStaticFindOverlappingPairsJob
-            {
-                StaticTree = StaticTree,
-                BodyIndexBase = DynamicTree.NumBodies,
-                PairWriter = staticVsStaticPairsStream.AsWriter()
-            }.Schedule(inputDeps);
         }
 
         #endregion
@@ -1116,7 +1102,7 @@ namespace Unity.Physics
 
                 MotionExpansion expansion = mv.CalculateExpansion(timeStep);
                 var aabb = expansion.ExpandAabb(body.CalculateAabb());
-                aabb.Expand(math.max(aabbMargin, GlobalAabbMargin));
+                aabb.Expand(aabbMargin);
 
                 return aabb;
             }
@@ -1200,7 +1186,7 @@ namespace Unity.Physics
             internal static Aabb CalculateAabb(ref RigidBody body, float aabbMargin)
             {
                 var aabb = body.CalculateAabb();
-                aabb.Expand(math.max(aabbMargin, GlobalAabbMargin));
+                aabb.Expand(aabbMargin);
 
                 return aabb;
             }
@@ -1453,41 +1439,15 @@ namespace Unity.Physics
                 PairWriter.EndForEachIndex();
             }
 
-            internal static unsafe void ExecuteImpl(int2 pair, Tree tree, ref NativeStream.Writer pairWriter, int bodyIndexBase = 0)
+            internal static unsafe void ExecuteImpl(int2 pair, Tree dynamicTree, ref NativeStream.Writer pairWriter)
             {
-                var bodyFilters = tree.BodyFilters.GetUnsafeReadOnlyPtr();
-                var bodyRespondsToCollision = tree.RespondsToCollision.GetUnsafeReadOnlyPtr();
-                var bodySolverTypes = tree.BodySolverTypes.GetUnsafeReadOnlyPtr();
+                var bodyFilters = dynamicTree.BodyFilters.GetUnsafeReadOnlyPtr();
+                var bodyRespondsToCollision = dynamicTree.RespondsToCollision.GetUnsafeReadOnlyPtr();
+                var bodySolverTypes = dynamicTree.BodySolverTypes.GetUnsafeReadOnlyPtr();
                 var bufferedPairs = new BodyPairWriter((NativeStream.Writer*)UnsafeUtility.AddressOf(ref pairWriter),
-                    bodyFilters, bodyFilters, bodyRespondsToCollision, bodyRespondsToCollision, bodySolverTypes, bodySolverTypes,
-                    bodyIndexBase, bodyIndexBase);
-                new BoundingVolumeHierarchy(tree.Nodes.AsArray(), tree.NodeFilters.AsArray()).SelfBvhOverlap(ref bufferedPairs, pair.x, pair.y);
+                    bodyFilters, bodyFilters, bodyRespondsToCollision, bodyRespondsToCollision, bodySolverTypes, bodySolverTypes, 0, 0);
+                new BoundingVolumeHierarchy(dynamicTree.Nodes.AsArray(), dynamicTree.NodeFilters.AsArray()).SelfBvhOverlap(ref bufferedPairs, pair.x, pair.y);
                 bufferedPairs.Close();
-            }
-        }
-
-        // Writes static-static pairs of overlapping broadphase AABBs to a stream in a single job.
-        // TODO: FIXME: I know this is dumb but this is just a workaround. Later maybe we replace this.
-        // There won't be much static objects in VoxelisX world (at least Titania).
-        // So this instead of some proper caching is just fine. We just need this for broadphase (alien propagation).
-        [BurstCompile]
-        struct StaticVsStaticFindOverlappingPairsJob : IJob
-        {
-            [ReadOnly] public Tree StaticTree;
-            [ReadOnly] public int BodyIndexBase;
-            public NativeStream.Writer PairWriter;
-
-            public void Execute()
-            {
-                PairWriter.BeginForEachIndex(0);
-
-                if (StaticTree.NumBodies > 0)
-                {
-                    DynamicVsDynamicFindOverlappingPairsJob.ExecuteImpl(
-                        new int2(1, 1), StaticTree, ref PairWriter, BodyIndexBase);
-                }
-
-                PairWriter.EndForEachIndex();
             }
         }
 

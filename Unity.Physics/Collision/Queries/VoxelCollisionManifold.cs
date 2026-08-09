@@ -181,17 +181,8 @@ namespace Unity.Physics
         {
             MTransform bFromA = Mul(Inverse(worldFromB), worldFromA);
 
-            // Brick-overlap candidates are emitted during the marking pass below, with the
-            // original (unswapped) body orientation restored through the flipped flag.
-            var emission = new VoxelBrickOverlapEmission
-            {
-                Writer = context.VoxelBrickOverlapWriter,
-                BodyIndices = context.BodyIndices,
-                Flipped = flipped
-            };
-
             var contacts = new UnsafeList<VoxelContact>(256, Allocator.Temp);
-            CollectVoxelContacts(voxelA, voxelB, bFromA, maxDistance, emission, ref contacts);
+            CollectVoxelContacts(voxelA, voxelB, bFromA, maxDistance, ref contacts);
             WriteVoxelManifolds(contacts, context, worldFromB, materialA, materialB, flipped);
             contacts.Dispose();
         }
@@ -413,7 +404,6 @@ namespace Unity.Physics
             VoxelCollider* voxelB,
             in MTransform bFromA,
             float maxDistance,
-            in VoxelBrickOverlapEmission emission,
             ref UnsafeList<VoxelContact> contacts)
         {
             var sectorsA = voxelA->m_Sectors;
@@ -470,7 +460,7 @@ namespace Unity.Physics
                     // below is gated on the result.
                     bool overlapsB = MarkOverlappedBricksInB(
                         brickOriginBlocks, voxelB, bFromA, rowAbsSum, windowHalfWidth,
-                        emission, ref overlappedBricksB);
+                        ref overlappedBricksB);
                     if (!overlapsB)
                     {
                         continue;
@@ -540,8 +530,7 @@ namespace Unity.Physics
             return true;
         }
 
-        // Conservative A-sector-vs-whole-B reachability cull, shared by the contact path and
-        // the marking-only path.
+        // Conservative A-sector-vs-whole-B reachability cull for the contact path.
         static bool SectorCannotReachB(
             int3 sectorOriginA,
             in MTransform bFromA,
@@ -551,61 +540,9 @@ namespace Unity.Physics
             float3 boundsHalfB)
         {
             float3 sectorCenterInB = Mul(bFromA, (float3)sectorOriginA + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
-            float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS + Broadphase.GlobalAabbMargin) * rowAbsSum;
+            float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS) * rowAbsSum;
             float3 sectorDelta = math.abs(sectorCenterInB - boundsCenterB);
             return math.any(sectorDelta > sectorHalfExtentInB + boundsHalfB + windowHalfWidth);
-        }
-
-        // Marking-only traversal for pairs that want brick-overlap candidates but no contacts
-        // (the static-static path). Runs the same sector culling, allocated-A-brick enumeration
-        // and MarkOverlappedBricksInB calculation as the contact path, then stops: no key-block
-        // traversal, no probes, no manifolds.
-        internal static unsafe void MarkVoxelBrickOverlapCandidates(
-            VoxelCollider* voxelA,
-            VoxelCollider* voxelB,
-            in MTransform bFromA,
-            float maxDistance,
-            in VoxelBrickOverlapEmission emission)
-        {
-            var sectorsA = voxelA->m_Sectors;
-
-            float3x3 rot = bFromA.Rotation;
-            float3 rowAbsSum = math.abs(rot.c0) + math.abs(rot.c1) + math.abs(rot.c2);
-
-            float speculative = math.clamp(maxDistance, 0.0f, k_VoxelMaxSpeculativeMargin);
-            float windowHalfWidth = 1.0f + speculative;
-
-            if (!ComputeBodyBoundsInB(voxelB, out float3 boundsCenterB, out float3 boundsHalfB))
-            {
-                return;
-            }
-
-            var overlappedBricksB = new UnsafeHashSet<int3>(64, Allocator.Temp);
-
-            var keysA = sectorsA.GetKeyArray(Allocator.Temp);
-            for (int iSectorA = 0; iSectorA < keysA.Length; iSectorA++)
-            {
-                int3 sectorCoordA = keysA[iSectorA];
-                var sectorA = sectorsA[sectorCoordA];
-                int3 sectorOriginA = sectorCoordA * Sector.SECTOR_SIZE_IN_BLOCKS;
-
-                if (SectorCannotReachB(sectorOriginA, bFromA, rowAbsSum, windowHalfWidth, boundsCenterB, boundsHalfB))
-                {
-                    continue;
-                }
-
-                foreach (SectorNonEmptyBrickEnumerator.BrickRef brickRef in sectorA.Ptr->EnumerateNonEmptyBricks())
-                {
-                    int3 brickOriginBlocks = sectorOriginA
-                        + Sector.ToBrickPos((short)brickRef.BrickAbs) * Sector.SIZE_IN_BLOCKS;
-
-                    MarkOverlappedBricksInB(
-                        brickOriginBlocks, voxelB, bFromA, rowAbsSum, windowHalfWidth,
-                        emission, ref overlappedBricksB);
-                }
-            }
-            keysA.Dispose();
-            overlappedBricksB.Dispose();
         }
 
         // Tests one A brick (8³ blocks, given by its min-corner block coord in A grid) against
@@ -614,31 +551,17 @@ namespace Unity.Physics
         // The bound is the brick's voxel-center cloud in B space (center ± 3.5·|R| per axis)
         // dilated by the per-voxel window; per-axis distance never exceeds center distance in
         // any frame, so this is conservative for both passes' windows.
-        //
-        // When emission carries a writer, every (A brick, allocated B brick) hit additionally
-        // emits one brick-overlap candidate — including hits whose B brick was already in the
-        // set. The set deduplicates the B-side contact traversal, but the overlap graph must
-        // keep every distinct (A brick, B brick) relationship.
         static unsafe bool MarkOverlappedBricksInB(
             int3 brickOriginBlocksA,
             VoxelCollider* voxelB,
             in MTransform bFromA,
             float3 rowAbsSum,
             float windowHalfWidth,
-            in VoxelBrickOverlapEmission emission,
             ref UnsafeHashSet<int3> overlapped)
         {
-            float3 centerInB = Mul(bFromA, (float3)brickOriginBlocksA + 0.5f * Sector.SIZE_IN_BLOCKS);
-            
-            // For alien propagation to work properly, windowHalfWidth must be larger than 1.0.
-            float3 halfExtent = (0.5f * Sector.SIZE_IN_BLOCKS - 0.5f) * rowAbsSum + math.max(1.0f, windowHalfWidth);
-
-            // B cells whose centers can lie inside the dilated cloud, then the bricks holding
-            // them (arithmetic shifts floor-divide correctly for negative coords).
-            int3 cellLo = (int3)math.ceil(centerInB - halfExtent - 0.5f);
-            int3 cellHi = (int3)math.floor(centerInB + halfExtent - 0.5f);
-            int3 brickLo = cellLo >> Sector.SHIFT_IN_BLOCKS;
-            int3 brickHi = cellHi >> Sector.SHIFT_IN_BLOCKS;
+            GetOverlappingBrickRange(
+                brickOriginBlocksA, bFromA, rowAbsSum, windowHalfWidth,
+                out int3 brickLo, out int3 brickHi);
 
             bool any = false;
 
@@ -678,25 +601,36 @@ namespace Unity.Physics
 
                         overlapped.Add(brickCoord);
                         any = true;
-
-                        if (emission.Writer != null)
-                        {
-                            // Brick origin is brick-aligned, so the arithmetic shift is an
-                            // exact block→brick conversion (floors for negative coords).
-                            int3 brickCoordA = brickOriginBlocksA >> Sector.SHIFT_IN_BLOCKS;
-                            emission.Writer->Write(new VoxelBrickOverlapCandidate
-                            {
-                                BodyIndexA = emission.BodyIndices.BodyIndexA,
-                                BodyIndexB = emission.BodyIndices.BodyIndexB,
-                                BrickCoordsInA = emission.Flipped ? brickCoord : brickCoordA,
-                                BrickCoordsInB = emission.Flipped ? brickCoordA : brickCoord
-                            });
-                        }
                     }
                 }
             }
 
             return any;
+        }
+
+        // Shared by regular contact marking and the explicit post-simulation query API. The
+        // caller owns target-brick allocation tests and output policy; this helper only computes
+        // the conservative brick range reached by one source brick's voxel-center cloud.
+        internal static void GetOverlappingBrickRange(
+            int3 brickOriginBlocksA,
+            in MTransform bFromA,
+            float3 rowAbsSum,
+            float windowHalfWidth,
+            out int3 brickLo,
+            out int3 brickHi)
+        {
+            float3 centerInB = Mul(
+                bFromA,
+                (float3)brickOriginBlocksA + 0.5f * Sector.SIZE_IN_BLOCKS);
+            float3 halfExtent =
+                (0.5f * Sector.SIZE_IN_BLOCKS - 0.5f) * rowAbsSum + windowHalfWidth;
+
+            // B cells whose centers can lie inside the dilated cloud, then the bricks holding
+            // them (arithmetic shifts floor-divide correctly for negative coordinates).
+            int3 cellLo = (int3)math.ceil(centerInB - halfExtent - 0.5f);
+            int3 cellHi = (int3)math.floor(centerInB + halfExtent - 0.5f);
+            brickLo = cellLo >> Sector.SHIFT_IN_BLOCKS;
+            brickHi = cellHi >> Sector.SHIFT_IN_BLOCKS;
         }
 
         // Probes every candidate cell of the opposite body within the window around one source
