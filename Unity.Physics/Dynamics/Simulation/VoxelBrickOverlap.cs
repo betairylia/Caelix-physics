@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Jobs;
@@ -8,10 +9,45 @@ using static Unity.Physics.Math;
 namespace Unity.Physics
 {
     /// <summary>
+    /// Describes one lane in a voxel-brick query stream.
+    /// </summary>
+    /// <remarks>
+    /// A batch may contain any spatial grouping of bricks. All brick records in the corresponding
+    /// stream lane must belong to one source entity, identified by <see cref="SourceBodyIndex"/>.
+    /// One source entity may be represented by any number of batches.
+    /// </remarks>
+    public struct VoxelBrickOverlapQueryBatch
+    {
+        /// <summary>
+        /// The transient <see cref="CollisionWorld"/> body index that identifies the source entity.
+        /// </summary>
+        public int SourceBodyIndex;
+    }
+
+    /// <summary>One source brick record in a voxel-brick query batch.</summary>
+    /// <remarks>
+    /// <see cref="BrickCoord"/> is a global brick coordinate in the source collider's local
+    /// voxel grid, including sector offsets. <see cref="Flags"/> is source metadata forwarded
+    /// to the compile-time target-brick policy hook.
+    /// </remarks>
+    [StructLayout(LayoutKind.Sequential, Size = 16)]
+    public struct VoxelBrickOverlapQuery
+    {
+        public int3 BrickCoord;
+        public ushort Flags;
+
+        public VoxelBrickOverlapQuery(int3 brickCoord, ushort flags)
+        {
+            BrickCoord = brickCoord;
+            Flags = flags;
+        }
+    }
+
+    /// <summary>
     /// One raw overlap between a queried brick and an allocated brick of another voxel body.
     /// Coordinates are global brick coordinates in each collider's local voxel grid, including
     /// sector offsets. Results are unsorted and may repeat when the input contains duplicate
-    /// queries or both endpoints of the same pair are queried.
+    /// queries, overlapping batches, or both endpoints of the same pair are queried.
     /// </summary>
     public struct VoxelBrickOverlapCandidate
     {
@@ -24,38 +60,42 @@ namespace Unity.Physics
     /// <summary>Post-simulation voxel-brick queries over a collision world's BVH4 broadphase.</summary>
     public static class VoxelBrickOverlapQueryExtensions
     {
-        // REVIEW: VIBE: Why queryBricksByBody is a ParallelMultiHashMap? Seems a NativeStream is more fit.
-        // #low-performant
         /// <summary>
-        /// Schedules one BVH traversal per queried source body, then tests all of that body's
-        /// queried bricks against each candidate target body. The input maps transient collision-
-        /// world body indices to global brick coordinates in that body's local voxel grid.
+        /// Schedules one BVH traversal per query batch, then tests the batch's source bricks
+        /// against each candidate target body.
         /// </summary>
         /// <remarks>
-        /// <paramref name="queryBricksByBody"/> is suitable for parallel construction through
-        /// <see cref="NativeParallelMultiHashMap{TKey,TValue}.ParallelWriter"/>. Pass the producer
-        /// handle in <paramref name="inputDeps"/>; no main-thread completion is required.
+        /// <paramref name="queryBatches"/> and <paramref name="queryBricksByBatch"/> describe the
+        /// same batches by index. For a nonempty request, the stream must contain exactly
+        /// <c>queryBatches.Length</c> lanes. Stream lane <c>i</c> contains
+        /// <see cref="VoxelBrickOverlapQuery"/> records belonging to
+        /// <c>queryBatches[i].SourceBodyIndex</c>. A batch may use any grouping, but must not mix
+        /// source bodies. Separate batches may identify the same source body.
+        ///
+        /// The input stream may be constructed by jobs. Pass all input producer handles in
+        /// <paramref name="inputDeps"/>; no main-thread completion is required.
         ///
         /// The collision world's dynamic tree must describe the desired pose. When this runs
         /// after a simulation step, set <see cref="SimulationStepInput.SynchronizeCollisionWorld"/>
         /// so the solver-integrated transforms and dynamic BVH are synchronized first.
         ///
         /// The returned stream uses <see cref="Allocator.TempJob"/> and belongs to the caller.
-        /// Dispose it after its consumers complete. A stream for-each index is the source body
-        /// index; raw candidates retain transient body indices for the voxel-side graph builder.
+        /// Dispose it after its consumers complete. An output stream for-each index is the input
+        /// batch index; raw candidates retain transient body indices for the voxel-side consumer.
         /// </remarks>
         public static JobHandle ScheduleVoxelBrickOverlaps(
             this CollisionWorld collisionWorld,
-            NativeParallelMultiHashMap<int, int3> queryBricksByBody,
+            NativeArray<VoxelBrickOverlapQueryBatch> queryBatches,
+            NativeStream queryBricksByBatch,
             out NativeStream overlaps,
             JobHandle inputDeps = default)
         {
-            // NativeStream requires at least one lane. Worlds with no bodies schedule no query
-            // work and leave that sole lane empty.
-            int laneCount = math.max(1, collisionWorld.NumBodies);
+            // NativeStream requires at least one lane. An empty request schedules no query work
+            // and leaves that sole lane empty.
+            int laneCount = math.max(1, queryBatches.Length);
             overlaps = new NativeStream(laneCount, Allocator.TempJob);
 
-            if (collisionWorld.NumBodies == 0)
+            if (collisionWorld.NumBodies == 0 || queryBatches.Length == 0)
             {
                 return inputDeps;
             }
@@ -63,9 +103,10 @@ namespace Unity.Physics
             return new FindVoxelBrickOverlapsJob
             {
                 CollisionWorld = collisionWorld,
-                QueryBricksByBody = queryBricksByBody,
+                QueryBatches = queryBatches,
+                QueryBricksByBatch = queryBricksByBatch.AsReader(),
                 OverlapWriter = overlaps.AsWriter()
-            }.Schedule(collisionWorld.NumBodies, 1, inputDeps);
+            }.Schedule(queryBatches.Length, 1, inputDeps);
         }
     }
 
@@ -77,24 +118,22 @@ namespace Unity.Physics
         const float k_QueryHaloInVoxels = 1.0f;
 
         [ReadOnly] public CollisionWorld CollisionWorld;
-        [ReadOnly] public NativeParallelMultiHashMap<int, int3> QueryBricksByBody;
+        [ReadOnly] public NativeArray<VoxelBrickOverlapQueryBatch> QueryBatches;
+        public NativeStream.Reader QueryBricksByBatch;
         public NativeStream.Writer OverlapWriter;
 
-        public void Execute(int sourceBodyIndex)
+        public void Execute(int batchIndex)
         {
-            OverlapWriter.BeginForEachIndex(sourceBodyIndex);
-            QueryBody(sourceBodyIndex, ref OverlapWriter);
+            OverlapWriter.BeginForEachIndex(batchIndex);
+            QueryBatch(batchIndex, ref OverlapWriter);
             OverlapWriter.EndForEachIndex();
         }
 
-        // REVIEW: VIBE: Remove safety checks / allocated checks here since it can be guranteed by upstream.
-        // or at least gate it behind some compiler flags.
-        // #over-defensive
-        void QueryBody(int sourceBodyIndex, ref NativeStream.Writer writer)
+        void QueryBatch(int batchIndex, ref NativeStream.Writer writer)
         {
-            if (!QueryBricksByBody.TryGetFirstValue(
-                sourceBodyIndex, out int3 sourceBrick,
-                out NativeParallelMultiHashMapIterator<int> iterator))
+            VoxelBrickOverlapQueryBatch sourceBatch = QueryBatches[batchIndex];
+            int sourceBodyIndex = sourceBatch.SourceBodyIndex;
+            if ((uint)sourceBodyIndex >= (uint)CollisionWorld.NumBodies)
             {
                 return;
             }
@@ -107,27 +146,24 @@ namespace Unity.Physics
                 return;
             }
 
-            VoxelCollider* sourceVoxel = (VoxelCollider*)sourceCollider;
-            var validSourceBricks = new NativeList<int3>(16, Allocator.Temp);
-            Aabb aggregateQueryAabb = Aabb.Empty;
-
-            do
+            NativeStream.Reader queryReader = QueryBricksByBatch;
+            int queryCount = queryReader.BeginForEachIndex(batchIndex);
+            if (queryCount == 0)
             {
-                if (!IsAllocatedBrick(sourceVoxel, sourceBrick))
-                {
-                    continue;
-                }
-
-                validSourceBricks.Add(sourceBrick);
-                aggregateQueryAabb.Include(QueryWorldAabb(sourceBody, sourceBrick));
-            }
-            while (QueryBricksByBody.TryGetNextValue(out sourceBrick, ref iterator));
-
-            if (validSourceBricks.IsEmpty)
-            {
-                validSourceBricks.Dispose();
+                queryReader.EndForEachIndex();
                 return;
             }
+
+            var sourceQueries = new NativeList<VoxelBrickOverlapQuery>(queryCount, Allocator.Temp);
+            Aabb aggregateQueryAabb = Aabb.Empty;
+
+            for (int queryIndex = 0; queryIndex < queryCount; queryIndex++)
+            {
+                VoxelBrickOverlapQuery sourceQuery = queryReader.Read<VoxelBrickOverlapQuery>();
+                sourceQueries.Add(sourceQuery);
+                aggregateQueryAabb.Include(QueryWorldAabb(sourceBody, sourceQuery.BrickCoord));
+            }
+            queryReader.EndForEachIndex();
 
             // CollisionWorld.OverlapAabb traverses the 4-ary broadphase and tests the query
             // against four child bounds at a time through FourTransposedAabbs.
@@ -140,7 +176,7 @@ namespace Unity.Physics
                 Filter = sourceCollider->GetCollisionFilter()
             }, ref bodyHits);
 
-            NativeArray<int3> sourceBricks = validSourceBricks.AsArray();
+            NativeArray<VoxelBrickOverlapQuery> sourceBricks = sourceQueries.AsArray();
             for (int i = 0; i < bodyHits.Length; i++)
             {
                 int targetBodyIndex = bodyHits[i];
@@ -155,12 +191,12 @@ namespace Unity.Physics
                 }
 
                 EmitTargetBricks(
-                    sourceBodyIndex, sourceBricks, sourceBody,
+                    sourceBatch, sourceBricks, sourceBody,
                     targetBodyIndex, targetBody, (VoxelCollider*)targetCollider, ref writer);
             }
 
             bodyHits.Dispose();
-            validSourceBricks.Dispose();
+            sourceQueries.Dispose();
         }
 
         static Aabb QueryWorldAabb(in RigidBody sourceBody, int3 sourceBrick)
@@ -184,8 +220,8 @@ namespace Unity.Physics
                 return false;
             }
 
-            // Keep the old graph's physics-approved body policy. This defensive filter check is
-            // intentionally local even though the BVH leaf processor already applies it.
+            // Require the same body-level collision eligibility used by physics. This defensive
+            // filter check is local even though the BVH leaf processor already applies it.
             if (!sourceCollider->RespondsToCollision || !targetCollider->RespondsToCollision ||
                 !CollisionFilter.IsCollisionEnabled(
                     sourceCollider->GetCollisionFilter(), targetCollider->GetCollisionFilter()))
@@ -202,8 +238,8 @@ namespace Unity.Physics
         }
 
         static void EmitTargetBricks(
-            int sourceBodyIndex,
-            NativeArray<int3> sourceBricks,
+            VoxelBrickOverlapQueryBatch sourceBatch,
+            NativeArray<VoxelBrickOverlapQuery> sourceBricks,
             in RigidBody sourceBody,
             int targetBodyIndex,
             in RigidBody targetBody,
@@ -219,9 +255,10 @@ namespace Unity.Physics
 
             for (int sourceIndex = 0; sourceIndex < sourceBricks.Length; sourceIndex++)
             {
-                int3 sourceBrick = sourceBricks[sourceIndex];
-                // A one-voxel dilation reproduces the previous graph's alien-neighborhood
-                // reach without changing regular broadphase or narrowphase tolerances.
+                VoxelBrickOverlapQuery sourceQuery = sourceBricks[sourceIndex];
+                int3 sourceBrick = sourceQuery.BrickCoord;
+                // A one-voxel dilation supplies alien-neighborhood reach without changing
+                // regular broadphase or narrowphase tolerances.
                 ManifoldQueries.GetOverlappingBrickRange(
                     sourceBrick * Sector.SIZE_IN_BLOCKS,
                     targetFromSource,
@@ -231,14 +268,14 @@ namespace Unity.Physics
                     out int3 brickHi);
 
                 EmitAllocatedTargetRange(
-                    sourceBodyIndex, sourceBrick, targetBodyIndex,
+                    sourceBatch, sourceQuery, targetBodyIndex,
                     brickLo, brickHi, targetVoxel, ref writer);
             }
         }
 
         static void EmitAllocatedTargetRange(
-            int sourceBodyIndex,
-            int3 sourceBrick,
+            VoxelBrickOverlapQueryBatch sourceBatch,
+            VoxelBrickOverlapQuery sourceQuery,
             int targetBodyIndex,
             int3 brickLo,
             int3 brickHi,
@@ -275,6 +312,7 @@ namespace Unity.Physics
                             brickInSector.x, brickInSector.y, brickInSector.z)];
                         if (brickId == Sector.BRICKID_EMPTY ||
                             !ShouldIncludeTargetBrick(
+                                sourceBatch, sourceQuery,
                                 targetVoxel, targetBrick, cachedSector, brickId))
                         {
                             continue;
@@ -282,9 +320,9 @@ namespace Unity.Physics
 
                         writer.Write(new VoxelBrickOverlapCandidate
                         {
-                            BodyIndexA = sourceBodyIndex,
+                            BodyIndexA = sourceBatch.SourceBodyIndex,
                             BodyIndexB = targetBodyIndex,
-                            BrickCoordsInA = sourceBrick,
+                            BrickCoordsInA = sourceQuery.BrickCoord,
                             BrickCoordsInB = targetBrick
                         });
                     }
@@ -292,36 +330,20 @@ namespace Unity.Physics
             }
         }
 
-        // TODO: This is not source-aware.
         /// <summary>
-        /// Compile-time target-brick policy hook. Add future persistent-flag or voxel-property
-        /// filtering here; the public API intentionally has no runtime policy parameters yet.
+        /// Compile-time target-brick policy hook. The source batch supplies the source entity
+        /// identifier and the source query supplies its flags. Target persistent-flag or
+        /// voxel-property filtering belongs here.
         /// </summary>
         static bool ShouldIncludeTargetBrick(
+            VoxelBrickOverlapQueryBatch sourceBatch,
+            VoxelBrickOverlapQuery sourceQuery,
             VoxelCollider* targetVoxel,
             int3 targetBrick,
             SectorHandle targetSector,
             short targetBrickId)
         {
             return true;
-        }
-
-        static bool IsAllocatedBrick(VoxelCollider* voxel, int3 brickCoord)
-        {
-            if (!voxel->m_Sectors.IsCreated || voxel->m_Sectors.IsEmpty)
-            {
-                return false;
-            }
-
-            int3 sectorCoord = brickCoord >> Sector.SHIFT_IN_BRICKS;
-            if (!voxel->m_Sectors.TryGetValue(sectorCoord, out SectorHandle sector) || sector.IsNull)
-            {
-                return false;
-            }
-
-            int3 brickInSector = brickCoord & Sector.SECTOR_MASK;
-            return sector.Ptr->brickIdx[Sector.ToBrickIdx(
-                brickInSector.x, brickInSector.y, brickInSector.z)] != Sector.BRICKID_EMPTY;
         }
     }
 }
