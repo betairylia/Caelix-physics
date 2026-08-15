@@ -69,9 +69,9 @@ namespace Unity.Physics
         // Half width of the transverse footprint a B cell owns on a masked (unexposed) axis:
         // half a cell plus a small seam margin so contacts stay continuous while A crosses cell
         // boundaries (both cells emit the same plane contact inside the margin band).
-        const float k_VoxelFootprintHalfWidth = 0.55f;
+        const float k_VoxelFootprintHalfWidth = 0.866f;
 
-        const float k_VoxelConstraintEdgeEdgeDegenerationThreshold = 0.9f;
+        const float k_VoxelConstraintEdgeEdgeDegenerationThreshold = 0.98f;
 
         // One raw generated contact, in B grid space.
         struct VoxelContact
@@ -755,38 +755,8 @@ namespace Unity.Physics
             float3 normalInB = maskedDelta / centerDistance;
             float separation = centerDistance - 1.0f; // both radii 0.5
 
-            // Exactly one non-zero component left after masking makes an
-            // axis-face contact (masked components are exactly zero).
-            int faceAxis = -1;
-            int nonZero = 0;
-            for (int axis = 0; axis < 3; axis++)
-            {
-                if (maskedDelta[axis] != 0.0f)
-                {
-                    nonZero++;
-                    faceAxis = axis;
-                }
-            }
-
-            if (nonZero != 1)
-            {
-                faceAxis = -1;
-            }
-
-            // TODO: Do we really need this snap?
-            // Axis-aligned contacts snap laterally to the A voxel center
-            // on the B face plane (no phantom torque); diagonal contacts
-            // sit on the B sphere surface.
             float3 posInB;
-            if (faceAxis >= 0)
-            {
-                posInB = centerAInB;
-                posInB[faceAxis] = cellCenter[faceAxis] + (maskedDelta[faceAxis] > 0.0f ? 0.5f : -0.5f);
-            }
-            else
-            {
-                posInB = cellCenter + 0.5f * normalInB;
-            }
+            posInB = cellCenter + 0.5f * normalInB;
 
             contacts.Add(new VoxelContact
             {
@@ -845,8 +815,8 @@ namespace Unity.Physics
                 };
 
 #if SHOW_DEBUG
-                Debug.DrawRay(Mul(worldFromB, contact.PosInB), manifold.Normal * 0.5f,
-                    Color.red, 0.0f, false);
+                Debug.DrawRay(Mul(worldFromB, contact.PosInB), manifold.Normal * 0.5f * (-contact.Distance) * 100.0f,
+                    contact.Distance > 0 ? Color.cyan : Color.red, 0.0f, false);
 #endif
 
                 WriteManifold(manifold, context, ColliderKeyPair.Empty, materialA, materialB, flipped);
