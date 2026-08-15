@@ -6,8 +6,6 @@ using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
 using Voxelis;
 using static Unity.Physics.Math;
-using System;
-using NUnit.Framework;
 
 
 
@@ -22,28 +20,24 @@ namespace Unity.Physics
         // ---------------------------------------------------------------------------------------
         // Voxel vs voxel contact generation.
         //
-        // Collision model: every voxel is a SPHERE of radius 0.5 at the voxel center, with the
-        // center-to-center direction masked by the touched voxel's face-exposure bits. This is
-        // deliberate ("rounded" voxels):
-        //   * Masking interior directions makes flat surfaces act flat (a voxel resting anywhere
-        //     on a plane sees a pure face normal and a face-plane distance), while real corners
-        //     and edges keep their diagonal normals, so voxel entities behave as if their corners
-        //     were rounded - a 1-wide pole spins/rolls freely in a 1-wide hole.
-        //   * Spheres are rotation invariant, so rotated bodies never jam in snug spaces and the
-        //     contact distance is exact regardless of relative orientation.
+        // Collision model: occupied voxel centers form a finite cubical complex. Adjacent centers
+        // form segments, four occupied centers form a square, and eight form a cube. Sweeping a
+        // sphere of radius 0.5 over that complex gives the collision surface:
+        //   * isolated voxels are spheres and one-voxel poles are capsules;
+        //   * squares and cubes create exact flat patches;
+        //   * an L shape has two connected segments but no fabricated diagonal square;
+        //   * every feature is finite, so ownership changes clamp to a shared edge or point instead
+        //     of creating or deleting an infinite plane at a footprint threshold.
         //
-        // Masking an axis is only valid inside the B cell's own transverse footprint: a face
-        // plane extends across face-adjacent solid neighbors, but each cell only owns the part
-        // over its own footprint. When A lies beyond the footprint on an unexposed axis, the
-        // neighbor cell on that side owns the surface facing A and this cell emits nothing.
-        // (Without this gate, inside corners fabricate full-depth phantom contacts: the masked
-        // delta of a diagonally offset A voxel collapses to a near-zero residual, reporting
-        // separation ~ -1 along an arbitrary exposed axis.)
+        // PhysicsInfo's high byte stores the occupied positive 2x2x2 octet. Each voxel owns the
+        // point/segment/square/cube features rooted at its center. The narrowphase finds closest
+        // points between these finite convex cores and lets the existing convex-distance query add
+        // the two 0.5 radii. This is an analytic local distance field, not a sampled SDF.
         //
         // This file intentionally contains GENERATION ONLY: every surviving (A voxel, B cell)
         // probe emits one raw contact, written as its own single-point manifold plus one contact
-        // event. There is no deduplication, merging, or reduction - a voxel straddling a cell
-        // seam emits one contact per facing cell (identical plane contacts). The previous
+        // event. Canonical half-open cells remove exact seam duplicates. There is no patch merging
+        // or reduction. The previous
         // merging / joint extraction stages (per-(A voxel, sign class) keep-deepest buckets,
         // fusion of opposing contacts into bilateral equality points, per-axis manifold merging,
         // rim/extreme reduction) were removed 2026-07 to make room for a new patch-based merging
@@ -62,16 +56,8 @@ namespace Unity.Physics
         // distance gate still uses the full maxDistance; this only bounds the search volume.
         const float k_VoxelMaxSpeculativeMargin = 0.5f;
 
-        // Masked direction components smaller than this count as zero (avoids near-zero-length
-        // normal directions).
-        const float k_VoxelSignDeadzone = 1e-4f;
-
-        // Half width of the transverse footprint a B cell owns on a masked (unexposed) axis:
-        // half a cell plus a small seam margin so contacts stay continuous while A crosses cell
-        // boundaries (both cells emit the same plane contact inside the margin band).
-        const float k_VoxelFootprintHalfWidth = 0.866f;
-
-        const float k_VoxelConstraintEdgeEdgeDegenerationThreshold = 0.98f;
+        // Current collider model is intentionally fixed to the fully rounded case.
+        const float k_VoxelCoreRadius = 0.5f;
 
         // One raw generated contact, in B grid space.
         struct VoxelContact
@@ -83,19 +69,20 @@ namespace Unity.Physics
             public int3 VoxelB;       // contributing B voxel (B grid)
             // public bool Diagonal;     // corner/edge rounding contact (not an axis-face contact)
 
-            // Bin assignment of this contact point.
-            // Contact points are binned by their normal directions.
-            // The masking step computes corrected normals and bin assignments from raw normals (raw Avoxel-Bvoxel center differences) and face masks (PhysicsInfo slot).
-            // Let the rank of a contact be the number of constraints the contact normal must satisfy. 1 unexposed face corresponds to 1 constraint (dot-product = 0).
-            // Bins are arranged by:
-            //   0     - Rank-0 (Corner-Corner) or Rank-1 (Corner-Edge) contacts
-            //   1-3   - Constraint on Entity A's YZ, XZ or XY axes (i.e., normal is A's X, Y and Z)
-            //   4-6   - Constraint on Entity B's YZ, XZ or XY axes (i.e., normal is B's X, Y and Z)
-            //   7-15  - Constraint on {Entity A's X, Y, Z} x {Entity B's X, Y, Z} axes (i.e., normal is computed via cross-product)
-            // Negative bin value is possible and it represents negative direction in the corresponding constrainted axis.
-            // In following stages, bin info will be used to further merge contacts.
-            // "Rank-3 and Rank-4" contacts should be omitted / ignored and not creating any contacts. Instead, the solver should rely on Rank-0/1/2 contacts only.
+            // Reserved for the future patch reducer. Cubical-feature contacts currently use bin 0.
             public int normalBin;
+        }
+
+        // One finite convex cell of the voxel-center cubical complex. AxisMask uses X=1, Y=2,
+        // Z=4. A point has mask 0, a segment one bit, a square two bits, and a cube all three.
+        struct CubicCoreFeature
+        {
+            public int VertexOffset;
+            public int VertexCount;
+            public byte AxisMask;
+            public float3 RootInLocal;
+            public float3 MinInB;
+            public float3 MaxInB;
         }
 
         internal static unsafe void VoxelVoxel(
@@ -188,201 +175,273 @@ namespace Unity.Physics
         }
             
 
-        private static bool ApplyNormalMasking(
-            float3 delta, PhysicsInfo infoA, PhysicsInfo infoB, MTransform bFromA,
-            out float3 maskedDelta, out int normalBin)
+        // Adds one feature rooted at voxelCenter. Its vertices are emitted in B space so all
+        // feature-pair distance queries use the identity transform.
+        private static unsafe void AddCubicCoreFeature(
+            float3 voxelCenter,
+            byte axisMask,
+            bool transformFromA,
+            in MTransform bFromA,
+            CubicCoreFeature* features,
+            ref int featureCount,
+            float3* vertices,
+            ref int vertexCount)
         {
-            maskedDelta = delta;
-
-            // Flags bits store 3 - (solid-surrounded axis count); ~ over the int-promoted
-            // byte sets bits 8..31, so mask back down to the 2-bit field.
-            // TODO: FIXME: This does not align with the true constraint rank when half-constraints exists.
-            // But, How do we correctly count number of constraints for half-constraints (boundary voxels)?
-            int numConstraintsA_lowerBound = ((~infoA.data) >> 6) & 0b11;
-            int numConstraintsB_lowerBound = ((~infoB.data) >> 6) & 0b11;
-            int numConstraintsTotal_lowerBound = numConstraintsA_lowerBound + numConstraintsB_lowerBound;
-
-            // TODO: Skip some corner-corner cases where (data & 0x3F) == 0x3F?
-
-            // TODO: Check degenerate case?
-            // Allow only CORNER-FACE (0+2) & EDGE-EDGE (1+1) pairs.
-            if (numConstraintsTotal_lowerBound > 2)
+            CubicCoreFeature feature = new CubicCoreFeature
             {
-                normalBin = 0;
-                return false;
-            }
+                VertexOffset = vertexCount,
+                VertexCount = 0,
+                AxisMask = axisMask,
+                RootInLocal = voxelCenter,
+                MinInB = new float3(float.MaxValue),
+                MaxInB = new float3(float.MinValue)
+            };
 
-            // Find constraint axes
-            float3 constraintA = float3.zero, constraintB = float3.zero;
-
-            int numConstraintsA = 0, numConstraintsB = 0;
-            int _debug_constraintRecord = 0;
-
-            // Start from B, then A; B's constraints takes priority.
-            // We cannot determine #constraints before checking the side of axis (computing `c`).
-            // Furthermore, even if we may have more than 2 constarints, we cannot simply drop e.g., an EDGE-EDGE
-            // with 3 constraints since there will be no fallback neighbors to catch the actual collision.
-            // To handle this case, we priortize B's constraints rather than drop rank>2 collisions.
-            for (int obj = 1; obj >= 0; obj--)
+            int maxX = (axisMask & 1) != 0 ? 1 : 0;
+            int maxY = (axisMask & 2) != 0 ? 1 : 0;
+            int maxZ = (axisMask & 4) != 0 ? 1 : 0;
+            for (int z = 0; z <= maxZ; z++)
             {
-                for (int axis = 0; axis < 3; axis++)
+                for (int y = 0; y <= maxY; y++)
                 {
-                    // A's axes expressed in B space are the columns of bFromA.Rotation
-                    // (v_B = Rotation * v_A); B's axes in B space are the identity basis.
-                    float3 constraintAxis;
-                    int dataToRef = infoA.data;
-                    int axisID = obj * 3 + axis;
-                    switch (axisID)
+                    for (int x = 0; x <= maxX; x++)
                     {
-                        case 0: // A's X
-                            constraintAxis = bFromA.Rotation[0];
-                            break;
-                        case 1: // A's Y
-                            constraintAxis = bFromA.Rotation[1];
-                            break;
-                        case 2: // A's Z
-                            constraintAxis = bFromA.Rotation[2];
-                            break;
-                        case 3: // B's X
-                            constraintAxis = new float3(1, 0, 0);
-                            dataToRef = infoB.data;
-                            break;
-                        case 4: // B's Y
-                            constraintAxis = new float3(0, 1, 0);
-                            dataToRef = infoB.data;
-                            break;
-                        default: // 5: B's Z
-                            constraintAxis = new float3(0, 0, 1);
-                            dataToRef = infoB.data;
-                            break;
-                    }
-
-                    float c = math.dot(obj == 0 ? (-delta) : delta, constraintAxis);
-                    int face = axis * 2 + (c > 0.0f ? 0 : 1);
-
-                    // Mask out directions whose A or B face is not exposed: flat
-                    // surfaces act flat (face-adjacent voxels share one surface
-                    // plane), interior faces can never push, and a fully interior
-                    // overlap produces no contact at all instead of a fake normal.
-                    // Masking is footprint-gated: beyond the cell's own footprint
-                    // on an unexposed axis, the neighbor owns the surface facing
-                    // A and this cell emits nothing (see header).
-                    if ((dataToRef & (1 << face)) == 0)
-                    {
-                        // Skip phantom contacts
-                        if (c > k_VoxelFootprintHalfWidth || c < -k_VoxelFootprintHalfWidth)
-                        {
-                            normalBin = 0;
-                            return false;
-                        }
-
-                        _debug_constraintRecord += axisID * (int)math.exp10(numConstraintsA + numConstraintsB);
-
-                        switch (obj)
-                        {
-                            case 0:
-                                if (numConstraintsA == 0) { constraintA = constraintAxis; }
-                                else { constraintA = math.cross(constraintA, constraintAxis); }
-                                numConstraintsA++;
-                                break;
-                            case 1:
-                                if (numConstraintsB == 0) { constraintB = constraintAxis; }
-                                else { constraintB = math.cross(constraintB, constraintAxis); }
-                                numConstraintsB++;
-                                break;
-                        }
+                        float3 vertex = voxelCenter + new float3(x, y, z);
+                        float3 vertexInB = transformFromA ? Mul(bFromA, vertex) : vertex;
+                        vertices[vertexCount++] = vertexInB;
+                        feature.MinInB = math.min(feature.MinInB, vertexInB);
+                        feature.MaxInB = math.max(feature.MaxInB, vertexInB);
+                        feature.VertexCount++;
                     }
                 }
+            }
 
-                // We already found enough constraints
-                if (numConstraintsB == 2)
+            features[featureCount++] = feature;
+        }
+
+        // Builds the maximal positive cubical cells rooted at one voxel. A point is kept only when
+        // no positive feature starts here. End voxels therefore still represent the last sphere of
+        // a chain, while squares and cubes replace their contained positive edges.
+        private static unsafe int BuildCubicCoreFeatures(
+            int3 voxelCoord,
+            PhysicsInfo info,
+            bool transformFromA,
+            in MTransform bFromA,
+            CubicCoreFeature* features,
+            float3* vertices)
+        {
+            byte occupied = info.ForwardOccupancy;
+            bool edgeX = (occupied & (1 << 0)) != 0;
+            bool edgeY = (occupied & (1 << 1)) != 0;
+            bool edgeZ = (occupied & (1 << 2)) != 0;
+            bool squareXY = edgeX && edgeY && (occupied & (1 << 3)) != 0;
+            bool squareXZ = edgeX && edgeZ && (occupied & (1 << 4)) != 0;
+            bool squareYZ = edgeY && edgeZ && (occupied & (1 << 5)) != 0;
+            bool cube = squareXY && squareXZ && squareYZ && (occupied & (1 << 6)) != 0;
+
+            int featureCount = 0;
+            int vertexCount = 0;
+            float3 voxelCenter = (float3)voxelCoord + 0.5f;
+
+            if (cube)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 7, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+                return featureCount;
+            }
+
+            if (squareXY)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 3, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+            if (squareXZ)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 5, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+            if (squareYZ)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 6, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+
+            if (edgeX && !squareXY && !squareXZ)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 1, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+            if (edgeY && !squareXY && !squareYZ)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 2, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+            if (edgeZ && !squareXZ && !squareYZ)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 4, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+
+            if (featureCount == 0)
+            {
+                AddCubicCoreFeature(
+                    voxelCenter, 0, transformFromA, bFromA,
+                    features, ref featureCount, vertices, ref vertexCount);
+            }
+
+            return featureCount;
+        }
+
+        // Canonical cells use a half-open interval on every positive core axis. A neighboring
+        // feature owns the positive endpoint. End voxels own that point through their point
+        // feature. This removes duplicate seam contacts without changing the geometric distance.
+        private static bool OwnsCorePoint(CubicCoreFeature feature, float3 pointInLocal)
+        {
+            const float endpointTolerance = 1e-4f;
+            float3 offset = pointInLocal - feature.RootInLocal;
+            for (int axis = 0; axis < 3; axis++)
+            {
+                if ((feature.AxisMask & (1 << axis)) != 0 && offset[axis] >= 1.0f - endpointTolerance)
                 {
-                    break;
+                    return false;
                 }
             }
-
-            // Interior. How can this happen?
-            if (numConstraintsA > 2 || numConstraintsB > 2)
-            {
-                normalBin = 0;
-                return false;
-            }
-
-            //////////////////////////////////////
-            /// Pick the correct constraint set
-            //////////////////////////////////////
-
-            float3 constraint = float3.zero;
-            int numConstraintsTotal = 0;
-
-            // Case. Clean edge-to-edge
-            if (numConstraintsA == 1 && numConstraintsB == 1)
-            {
-                // Degenerate case
-                if(math.abs(math.dot(constraintA, constraintB)) > k_VoxelConstraintEdgeEdgeDegenerationThreshold)
-                {
-                    constraint = constraintB;
-                    numConstraintsTotal = numConstraintsB;
-                }
-                else
-                {
-                    constraint = math.normalize(math.cross(constraintB, constraintA));
-                    numConstraintsTotal = 2;
-                }
-            }
-            // Case. Use A
-            else if (numConstraintsA > 0 && numConstraintsB < 2)
-            {
-                constraint = constraintA;
-                numConstraintsTotal = numConstraintsA;
-            }
-            // Case. Use B
-            else if (numConstraintsB > 0 && numConstraintsA < 2)
-            {
-                constraint = constraintB;
-                numConstraintsTotal = numConstraintsB;
-            }
-            // Case. No constraints
-            else if (numConstraintsA == 0 && numConstraintsB == 0)
-            {
-                normalBin = 0;
-                return true;
-            }
-            // We should not reach this
-            else
-            {
-                throw new Exception("Bad contact constraints. How possibly can this happen?");
-            }
-
-            ///////////////////////////
-            /// Apply constraints
-            ///////////////////////////
-            
-            if (numConstraintsTotal == 0)
-            {
-                // No constraints in the half of delta, do nothing
-                normalBin = 0;
-            }
-            else if (numConstraintsTotal == 1)
-            {
-                maskedDelta = maskedDelta - math.dot(delta, constraint) * constraint;
-                // TODO: How to compute bin?
-                normalBin = 0;
-            }
-            else
-            {
-                maskedDelta = math.dot(delta, constraint) * constraint;
-                // if (math.abs(math.dot(delta, constraint)) < 0.5f)
-                // {
-                //     Debug.Log("!");
-                //     Debug.Log($"Delta: {delta} | Constraint: {constraint} => Masked: {maskedDelta}");
-                // }
-                // TODO: How to compute bin?
-                normalBin = 0;
-            }
-
-            normalBin = _debug_constraintRecord;
             return true;
+        }
+
+        private static unsafe void GetFeatureBounds(
+            CubicCoreFeature* features,
+            int featureCount,
+            out float3 minimum,
+            out float3 maximum)
+        {
+            minimum = features[0].MinInB;
+            maximum = features[0].MaxInB;
+            for (int i = 1; i < featureCount; i++)
+            {
+                minimum = math.min(minimum, features[i].MinInB);
+                maximum = math.max(maximum, features[i].MaxInB);
+            }
+        }
+
+        private static unsafe void GetTransformedFeatureBounds(
+            CubicCoreFeature* features,
+            int featureCount,
+            float3* vertices,
+            in MTransform destinationFromB,
+            out float3 minimum,
+            out float3 maximum)
+        {
+            minimum = new float3(float.MaxValue);
+            maximum = new float3(float.MinValue);
+            for (int i = 0; i < featureCount; i++)
+            {
+                CubicCoreFeature feature = features[i];
+                for (int vertexIndex = 0; vertexIndex < feature.VertexCount; vertexIndex++)
+                {
+                    float3 vertex = Mul(
+                        destinationFromB,
+                        vertices[feature.VertexOffset + vertexIndex]);
+                    minimum = math.min(minimum, vertex);
+                    maximum = math.max(maximum, vertex);
+                }
+            }
+        }
+
+        // A target feature can extend one positive cell from its root center. Expand the source
+        // core bounds by that cell and by the two rounded radii to get a conservative root range.
+        private static void GetCandidateVoxelRange(
+            float3 sourceMinimum,
+            float3 sourceMaximum,
+            float roundedReach,
+            out int3 lower,
+            out int3 upper)
+        {
+            float3 targetCenterMinimum = sourceMinimum - roundedReach - 1.0f;
+            float3 targetCenterMaximum = sourceMaximum + roundedReach;
+            lower = (int3)math.ceil(targetCenterMinimum - 0.5f);
+            upper = (int3)math.floor(targetCenterMaximum - 0.5f);
+        }
+
+        private static bool BuildRoundedCoreResult(
+            float3 corePointAinB,
+            float3 corePointBinB,
+            out DistanceQueries.Result result)
+        {
+            float3 delta = corePointAinB - corePointBinB;
+            float distanceSq = math.lengthsq(delta);
+            if (distanceSq <= 1e-8f)
+            {
+                result = default;
+                return false;
+            }
+
+            float coreDistance = math.sqrt(distanceSq);
+            float3 normalInB = delta / coreDistance;
+            result = new DistanceQueries.Result
+            {
+                NormalInA = normalInB,
+                PositionOnAinA = corePointAinB - normalInB * k_VoxelCoreRadius,
+                Distance = coreDistance - 2.0f * k_VoxelCoreRadius
+            };
+            return true;
+        }
+
+        // Point-feature pairs and grid-aligned feature pairs cover the common voxel cases. They
+        // need only clamps. Rotated feature-feature pairs use the general convex distance query.
+        private static unsafe bool TryFastCoreDistance(
+            CubicCoreFeature featureA,
+            CubicCoreFeature featureB,
+            float3* verticesA,
+            float3* verticesB,
+            in MTransform bFromA,
+            in MTransform aFromB,
+            out DistanceQueries.Result result)
+        {
+            if (featureA.VertexCount == 1)
+            {
+                float3 corePointAinB = verticesA[featureA.VertexOffset];
+                float3 corePointBinB = math.clamp(
+                    corePointAinB, featureB.MinInB, featureB.MaxInB);
+                return BuildRoundedCoreResult(corePointAinB, corePointBinB, out result);
+            }
+
+            if (featureB.VertexCount == 1)
+            {
+                float3 corePointBinB = verticesB[featureB.VertexOffset];
+                float3 pointBinA = Mul(aFromB, corePointBinB);
+                float3 featureMaxA = featureA.RootInLocal + new float3(
+                    (featureA.AxisMask & 1) != 0 ? 1.0f : 0.0f,
+                    (featureA.AxisMask & 2) != 0 ? 1.0f : 0.0f,
+                    (featureA.AxisMask & 4) != 0 ? 1.0f : 0.0f);
+                float3 corePointAinA = math.clamp(
+                    pointBinA, featureA.RootInLocal, featureMaxA);
+                return BuildRoundedCoreResult(
+                    Mul(bFromA, corePointAinA), corePointBinB, out result);
+            }
+
+            bool sameOrientation =
+                math.all(math.abs(bFromA.Rotation.c0 - new float3(1, 0, 0)) < 1e-5f) &&
+                math.all(math.abs(bFromA.Rotation.c1 - new float3(0, 1, 0)) < 1e-5f) &&
+                math.all(math.abs(bFromA.Rotation.c2 - new float3(0, 0, 1)) < 1e-5f);
+            if (!sameOrientation)
+            {
+                result = default;
+                return false;
+            }
+
+            float3 corePointA = math.max(featureA.MinInB, featureB.MinInB);
+            corePointA = math.min(corePointA, featureA.MaxInB);
+            float3 corePointB = math.clamp(corePointA, featureB.MinInB, featureB.MaxInB);
+            corePointA = math.clamp(corePointB, featureA.MinInB, featureA.MaxInB);
+            return BuildRoundedCoreResult(corePointA, corePointB, out result);
         }
 
         // Voxel-vs-voxel raw contact generation, key-block sourced and brick-culled:
@@ -393,12 +452,11 @@ namespace Unity.Physics
         //   Pass 2 (B-side): the key blocks of every marked B brick probe A's cells the same
         //   way, skipping A-key targets — those pairs were already emitted by pass 1.
         //
-        // Key-sourcing is exact, not an approximation: ApplyNormalMasking only lets pairs with
-        // constraint-rank sum <= 2 survive (Corner-Corner, Corner-Edge, Corner-Face, Edge-Edge),
-        // so every surviving pair has at least one key side, and the two passes together cover
-        // the same contact set the previous full non-empty-block sweep produced. Probes read
-        // the opposite body through its m_Sectors hashmap directly, so windows cross sector
-        // boundaries transparently and no per-sector-pair loop is needed.
+        // Corner and edge blocks remain the sparse contact sources. Every probed target block can
+        // contribute its finite point/segment/square/cube core, so broad flat targets stay flat
+        // without making every face voxel a source. The two passes make either body's sparse keys
+        // available as sources. Probes read the opposite body through its sector map directly, so
+        // windows cross sector boundaries without a per-sector-pair loop.
         static unsafe void CollectVoxelContacts(
             VoxelCollider* voxelA,
             VoxelCollider* voxelB,
@@ -410,22 +468,18 @@ namespace Unity.Physics
 
             MTransform aFromB = Inverse(bFromA);
 
-            // Conservative per-axis extent of a rotated A box in B space (for culling only;
-            // the sphere contact metric itself is rotation invariant).
+            // Conservative per-axis extent of a rotated A box in B space (for culling only).
             float3x3 rot = bFromA.Rotation;
             float3 rowAbsSum = math.abs(rot.c0) + math.abs(rot.c1) + math.abs(rot.c2);
 
             float speculative = math.clamp(maxDistance, 0.0f, k_VoxelMaxSpeculativeMargin);
 
-            // TODO: Check this thing's tightness.
-            // Candidate cells must lie within sphere reach (center distance 1) plus margin per
-            // axis. Keeping the window this tight is also what keeps the exposure-mask trick
-            // local to face-adjacent surface planes.
-            float windowHalfWidth = 1.0f + speculative;
-
-            // Sphere-sphere contact gate on center distance, squared to avoid sqrt on misses.
-            float maxCenterDistance = 1.0f + maxDistance;
-            float maxCenterDistanceSq = maxCenterDistance * maxCenterDistance;
+            // Brick and sector culling is centered on source voxel roots. A rotated positive
+            // feature can extend by at most sqrt(3) on one B axis. A target feature can extend one
+            // cell toward it, and the two radii add one more cell. HandleBlock computes a tighter
+            // range from each source feature set after this conservative cull.
+            float cullingWindowHalfWidth = 2.0f + math.sqrt(3.0f) + speculative;
+            float roundedReach = 2.0f * k_VoxelCoreRadius + speculative;
 
             // Whole-body bounds of B in its own grid (sector granularity), for A-sector culling.
             if (!ComputeBodyBoundsInB(voxelB, out float3 boundsCenterB, out float3 boundsHalfB))
@@ -445,7 +499,7 @@ namespace Unity.Physics
                 int3 sectorOriginA = sectorCoordA * Sector.SECTOR_SIZE_IN_BLOCKS;
 
                 // Cull A sectors that cannot reach B at all.
-                if (SectorCannotReachB(sectorOriginA, bFromA, rowAbsSum, windowHalfWidth, boundsCenterB, boundsHalfB))
+                if (SectorCannotReachB(sectorOriginA, bFromA, rowAbsSum, cullingWindowHalfWidth, boundsCenterB, boundsHalfB))
                 {
                     continue;
                 }
@@ -459,7 +513,7 @@ namespace Unity.Physics
                     // Face blocks that the B-side pass must probe. Only the key enumeration
                     // below is gated on the result.
                     bool overlapsB = MarkOverlappedBricksInB(
-                        brickOriginBlocks, voxelB, bFromA, rowAbsSum, windowHalfWidth,
+                        brickOriginBlocks, voxelB, bFromA, rowAbsSum, cullingWindowHalfWidth,
                         ref overlappedBricksB);
                     if (!overlapsB)
                     {
@@ -471,7 +525,7 @@ namespace Unity.Physics
                     {
                         HandleBlock(
                             blockIter.position, blockIter.value, voxelA, voxelB,
-                            bFromA, aFromB, windowHalfWidth, maxCenterDistanceSq,
+                            bFromA, aFromB, roundedReach, maxDistance,
                             isSourceFromB: false, ref contacts);
                     }
                 }
@@ -495,7 +549,7 @@ namespace Unity.Physics
                 {
                     HandleBlock(
                         blockIter.position, blockIter.value, voxelA, voxelB,
-                        bFromA, aFromB, windowHalfWidth, maxCenterDistanceSq,
+                        bFromA, aFromB, roundedReach, maxDistance,
                         isSourceFromB: true, ref contacts);
                 }
             }
@@ -535,14 +589,14 @@ namespace Unity.Physics
             int3 sectorOriginA,
             in MTransform bFromA,
             float3 rowAbsSum,
-            float windowHalfWidth,
+            float cullingWindowHalfWidth,
             float3 boundsCenterB,
             float3 boundsHalfB)
         {
             float3 sectorCenterInB = Mul(bFromA, (float3)sectorOriginA + 0.5f * Sector.SECTOR_SIZE_IN_BLOCKS);
             float3 sectorHalfExtentInB = (0.5f * Sector.SECTOR_SIZE_IN_BLOCKS) * rowAbsSum;
             float3 sectorDelta = math.abs(sectorCenterInB - boundsCenterB);
-            return math.any(sectorDelta > sectorHalfExtentInB + boundsHalfB + windowHalfWidth);
+            return math.any(sectorDelta > sectorHalfExtentInB + boundsHalfB + cullingWindowHalfWidth);
         }
 
         // Tests one A brick (8³ blocks, given by its min-corner block coord in A grid) against
@@ -556,11 +610,11 @@ namespace Unity.Physics
             VoxelCollider* voxelB,
             in MTransform bFromA,
             float3 rowAbsSum,
-            float windowHalfWidth,
+            float cullingWindowHalfWidth,
             ref UnsafeHashSet<int3> overlapped)
         {
             GetOverlappingBrickRange(
-                brickOriginBlocksA, bFromA, rowAbsSum, windowHalfWidth,
+                brickOriginBlocksA, bFromA, rowAbsSum, cullingWindowHalfWidth,
                 out int3 brickLo, out int3 brickHi);
 
             bool any = false;
@@ -634,9 +688,8 @@ namespace Unity.Physics
         }
 
         // Probes every candidate cell of the opposite body within the window around one source
-        // key block and appends the surviving contacts. The pair math (masking, gating, contact
-        // position) always runs in B grid space with the A/B roles fixed, so both passes emit
-        // identical contacts for identical pairs.
+        // key block and appends the surviving finite-feature contacts. Pair math always runs in B
+        // grid space with fixed A/B roles, so both passes emit identical contacts for identical pairs.
         static unsafe void HandleBlock(
             int3 sourceCoord,
             PhysicsInfo sourceInfo,
@@ -644,18 +697,26 @@ namespace Unity.Physics
             VoxelCollider* voxelB,
             in MTransform bFromA,
             in MTransform aFromB,
-            float windowHalfWidth,
-            float maxCenterDistanceSq,
+            float roundedReach,
+            float maxDistance,
             bool isSourceFromB,
             ref UnsafeList<VoxelContact> contacts)
         {
+            CubicCoreFeature* sourceFeatures = stackalloc CubicCoreFeature[4];
+            float3* sourceVertices = stackalloc float3[24];
+            int sourceFeatureCount = BuildCubicCoreFeatures(
+                sourceCoord, sourceInfo, !isSourceFromB, bFromA,
+                sourceFeatures, sourceVertices);
+
             if (!isSourceFromB)
             {
-                // An A key voxel probes B cells; the delta lives directly in B space.
-                float3 centerInB = Mul(bFromA, (float3)sourceCoord + 0.5f);
-
-                int3 lo = (int3)math.ceil(centerInB - 0.5f - windowHalfWidth);
-                int3 hi = (int3)math.floor(centerInB - 0.5f + windowHalfWidth);
+                // An A key voxel probes B cells. Its feature bounds already live in B space.
+                GetFeatureBounds(
+                    sourceFeatures, sourceFeatureCount,
+                    out float3 sourceMinimum, out float3 sourceMaximum);
+                GetCandidateVoxelRange(
+                    sourceMinimum, sourceMaximum, roundedReach,
+                    out int3 lo, out int3 hi);
 
                 for (int bz = lo.z; bz <= hi.z; bz++)
                 {
@@ -671,20 +732,22 @@ namespace Unity.Physics
                             }
 
                             EmitVoxelPairContact(
-                                sourceCoord, sourceInfo, cellCoord, infoB, centerInB,
-                                bFromA, maxCenterDistanceSq, ref contacts);
+                                sourceCoord, sourceInfo, cellCoord, infoB,
+                                bFromA, aFromB, maxDistance, false,
+                                sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
                         }
                     }
                 }
             }
             else
             {
-                // A B key cell probes A voxels; candidates are found in A grid space.
-                float3 cellCenterInB = (float3)sourceCoord + 0.5f;
-                float3 centerInA = Mul(aFromB, cellCenterInB);
-
-                int3 lo = (int3)math.ceil(centerInA - 0.5f - windowHalfWidth);
-                int3 hi = (int3)math.floor(centerInA - 0.5f + windowHalfWidth);
+                // A B key cell probes A voxels. Transform its complete finite feature bounds to A.
+                GetTransformedFeatureBounds(
+                    sourceFeatures, sourceFeatureCount, sourceVertices, aFromB,
+                    out float3 sourceMinimum, out float3 sourceMaximum);
+                GetCandidateVoxelRange(
+                    sourceMinimum, sourceMaximum, roundedReach,
+                    out int3 lo, out int3 hi);
 
                 for (int az = lo.z; az <= hi.z; az++)
                 {
@@ -705,68 +768,121 @@ namespace Unity.Physics
                                 continue;
                             }
 
-                            // The pair math needs A's center in B space. Rotating the A-space
-                            // offset equals Mul(bFromA, aVoxelCenter): the translation cancels
-                            // between the two points.
-                            float3 centerAInB = cellCenterInB
-                                + math.mul(bFromA.Rotation, (float3)voxelCoordA + 0.5f - centerInA);
-
                             EmitVoxelPairContact(
-                                voxelCoordA, infoA, sourceCoord, sourceInfo, centerAInB,
-                                bFromA, maxCenterDistanceSq, ref contacts);
+                                voxelCoordA, infoA, sourceCoord, sourceInfo,
+                                bFromA, aFromB, maxDistance, true,
+                                sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
                         }
                     }
                 }
             }
         }
 
-        // Masks, gates and appends one (A voxel, B cell) probe. Voxel coordinates are global
-        // grid coords of their own body; centerAInB is A's voxel center expressed in B grid
-        // space.
-        static void EmitVoxelPairContact(
+        // Finds the closest pair of finite cubical-core features rooted at these voxels and
+        // appends one contact for the closest pair inside the speculative distance.
+        static unsafe void EmitVoxelPairContact(
             int3 voxelCoordA,
             PhysicsInfo infoA,
             int3 voxelCoordB,
             PhysicsInfo infoB,
-            float3 centerAInB,
             in MTransform bFromA,
-            float maxCenterDistanceSq,
+            in MTransform aFromB,
+            float maxDistance,
+            bool isSourceFromB,
+            CubicCoreFeature* sourceFeatures,
+            int sourceFeatureCount,
+            float3* sourceVertices,
             ref UnsafeList<VoxelContact> contacts)
         {
-            float3 cellCenter = (float3)voxelCoordB + 0.5f;
-            float3 delta = centerAInB - cellCenter;
+            CubicCoreFeature* targetFeatures = stackalloc CubicCoreFeature[4];
+            float3* targetVertices = stackalloc float3[24];
+            int targetFeatureCount = BuildCubicCoreFeatures(
+                isSourceFromB ? voxelCoordA : voxelCoordB,
+                isSourceFromB ? infoA : infoB,
+                isSourceFromB,
+                bFromA,
+                targetFeatures,
+                targetVertices);
 
-            // Apply normal masking and filter phantoms & face-edge & face-face
-            bool shouldProceed = ApplyNormalMasking(
-                delta, infoA, infoB, bFromA, out float3 maskedDelta, out int normalBin);
-            if (!shouldProceed)
+            CubicCoreFeature* featuresA = isSourceFromB ? targetFeatures : sourceFeatures;
+            CubicCoreFeature* featuresB = isSourceFromB ? sourceFeatures : targetFeatures;
+            float3* verticesA = isSourceFromB ? targetVertices : sourceVertices;
+            float3* verticesB = isSourceFromB ? sourceVertices : targetVertices;
+            int featureCountA = isSourceFromB ? targetFeatureCount : sourceFeatureCount;
+            int featureCountB = isSourceFromB ? sourceFeatureCount : targetFeatureCount;
+
+            float bestDistance = float.MaxValue;
+            float maxCoreDistance = math.max(0.0f, 2.0f * k_VoxelCoreRadius + maxDistance);
+            float maxCoreDistanceSq = maxCoreDistance * maxCoreDistance;
+            DistanceQueries.Result best = default;
+            for (int i = 0; i < featureCountA; i++)
+            {
+                CubicCoreFeature featureA = featuresA[i];
+                for (int j = 0; j < featureCountB; j++)
+                {
+                    CubicCoreFeature featureB = featuresB[j];
+                    float3 aabbGap = math.max(
+                        math.max(featureA.MinInB - featureB.MaxInB,
+                                 featureB.MinInB - featureA.MaxInB),
+                        float3.zero);
+                    if (math.lengthsq(aabbGap) >= maxCoreDistanceSq)
+                    {
+                        continue;
+                    }
+
+                    DistanceQueries.Result candidate;
+                    if (!TryFastCoreDistance(
+                            featureA, featureB, verticesA, verticesB,
+                            bFromA, aFromB, out candidate))
+                    {
+                        candidate = DistanceQueries.ConvexConvex(
+                            verticesA + featureA.VertexOffset,
+                            featureA.VertexCount,
+                            k_VoxelCoreRadius,
+                            verticesB + featureB.VertexOffset,
+                            featureB.VertexCount,
+                            k_VoxelCoreRadius,
+                            MTransform.Identity);
+                    }
+
+                    float3 corePointAinB = candidate.PositionOnAinA +
+                                           candidate.NormalInA * k_VoxelCoreRadius;
+                    float3 corePointBinB = candidate.PositionOnBinA -
+                                           candidate.NormalInA * k_VoxelCoreRadius;
+                    bool sourceOwnsPoint = isSourceFromB
+                        ? OwnsCorePoint(featureB, corePointBinB)
+                        : OwnsCorePoint(featureA, Mul(aFromB, corePointAinB));
+                    bool targetOwnsPoint = isSourceFromB
+                        ? OwnsCorePoint(featureA, Mul(aFromB, corePointAinB))
+                        : OwnsCorePoint(featureB, corePointBinB);
+                    if (!sourceOwnsPoint || !targetOwnsPoint)
+                    {
+                        continue;
+                    }
+
+                    if (candidate.Distance < bestDistance)
+                    {
+                        bestDistance = candidate.Distance;
+                        best = candidate;
+                    }
+                }
+            }
+
+            if (bestDistance >= maxDistance || !math.isfinite(bestDistance) ||
+                !math.all(math.isfinite(best.NormalInA)) ||
+                !math.all(math.isfinite(best.PositionOnBinA)))
             {
                 return;
             }
-
-            // Check distance
-            float distanceSq = math.lengthsq(maskedDelta);
-            if (distanceSq <= 0.0f || distanceSq >= maxCenterDistanceSq)
-            {
-                return;
-            }
-
-            float centerDistance = math.sqrt(distanceSq);
-            float3 normalInB = maskedDelta / centerDistance;
-            float separation = centerDistance - 1.0f; // both radii 0.5
-
-            float3 posInB;
-            posInB = cellCenter + 0.5f * normalInB;
 
             contacts.Add(new VoxelContact
             {
-                Distance = separation,
-                NormalInB = normalInB,
-                PosInB = posInB,
+                Distance = bestDistance,
+                NormalInB = best.NormalInA,
+                PosInB = best.PositionOnBinA,
                 VoxelA = voxelCoordA,
                 VoxelB = voxelCoordB,
-                normalBin = normalBin
-                // Diagonal = faceAxis < 0
+                normalBin = 0
             });
         }
 
