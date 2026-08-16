@@ -29,7 +29,7 @@ namespace Unity.Physics
         //   * every feature is finite, so ownership changes clamp to a shared edge or point instead
         //     of creating or deleting an infinite plane at a footprint threshold.
         //
-        // PhysicsInfo's high byte stores the occupied positive 2x2x2 octet. Each voxel owns the
+        // PhysicsInfo's low seven bits store the occupied positive 2x2x2 octet. Each voxel owns the
         // point/segment/square/cube features rooted at its center. The narrowphase finds closest
         // points between these finite convex cores and lets the existing convex-distance query add
         // the two 0.5 radii. This is an analytic local distance field, not a sampled SDF.
@@ -46,9 +46,6 @@ namespace Unity.Physics
         // Conventions (matching the rest of the narrowphase):
         //   * Manifold normals point from B towards A; positive contact distance is separation.
         //   * Positions are in world space, on body B's surface.
-        //   * PhysicsInfo exposure bits follow NeighborhoodSettings face order:
-        //     bit = axis * 2 + (0 for +axis, 1 for -axis); a set bit means the face is exposed.
-        //
         // Uniform body scale is not supported here (assumed 1), same as the previous prototype.
         // ---------------------------------------------------------------------------------------
 
@@ -83,6 +80,13 @@ namespace Unity.Physics
             public float3 RootInLocal;
             public float3 MinInB;
             public float3 MaxInB;
+        }
+
+        unsafe struct VoxelBrickView
+        {
+            public PhysicsInfo* Physics;
+            public ulong* OccupiedMask;
+            public ulong* PhysicsKeyMask;
         }
 
         internal static unsafe void VoxelVoxel(
@@ -687,6 +691,120 @@ namespace Unity.Physics
             brickHi = cellHi >> Sector.SHIFT_IN_BLOCKS;
         }
 
+        // Resolves one global brick once. Candidate probes then use direct pointers for all cells
+        // in that brick instead of repeating a sector hash lookup and brick-map lookup per cell.
+        static unsafe bool TryGetVoxelBrick(
+            VoxelCollider* collider,
+            int3 globalBrickCoord,
+            out VoxelBrickView view)
+        {
+            int3 sectorCoord = globalBrickCoord >> Sector.SHIFT_IN_BRICKS;
+            if (!collider->m_Sectors.TryGetValue(sectorCoord, out SectorHandle handle) || handle.IsNull)
+            {
+                view = default;
+                return false;
+            }
+
+            int3 brickInSector = globalBrickCoord & Sector.SECTOR_MASK;
+            Sector* sector = handle.Ptr;
+            short bid = sector->brickIdx[
+                Sector.ToBrickIdx(brickInSector.x, brickInSector.y, brickInSector.z)];
+            if (bid == Sector.BRICKID_EMPTY)
+            {
+                view = default;
+                return false;
+            }
+
+            SectorSlotStorage* blockSlot = sector->slots + (int)SectorSlotId.Block;
+            SectorSlotStorage* physicsSlot = sector->slots + (int)SectorSlotId.PhysicsInfo;
+            // Production rebuilds both aux masks before physics. Without either mask this brick
+            // cannot use the sparse contact path safely.
+            if (!blockSlot->IsCreated || !blockSlot->HasAux ||
+                !physicsSlot->IsCreated || !physicsSlot->HasAux)
+            {
+                view = default;
+                return false;
+            }
+
+            view = new VoxelBrickView
+            {
+                Physics = (PhysicsInfo*)physicsSlot->GetBrickPtr(bid),
+                OccupiedMask = (ulong*)blockSlot->GetBrickAuxPtr(bid),
+                PhysicsKeyMask = (ulong*)physicsSlot->GetBrickAuxPtr(bid)
+            };
+            return true;
+        }
+
+        static unsafe void ProbeCandidateRange(
+            int3 lower,
+            int3 upper,
+            VoxelCollider* target,
+            int3 sourceCoord,
+            PhysicsInfo sourceInfo,
+            in MTransform bFromA,
+            in MTransform aFromB,
+            float maxDistance,
+            bool isSourceFromB,
+            CubicCoreFeature* sourceFeatures,
+            int sourceFeatureCount,
+            float3* sourceVertices,
+            ref UnsafeList<VoxelContact> contacts)
+        {
+            int3 lowerBrick = lower >> Sector.SHIFT_IN_BLOCKS;
+            int3 upperBrick = upper >> Sector.SHIFT_IN_BLOCKS;
+            for (int brickZ = lowerBrick.z; brickZ <= upperBrick.z; brickZ++)
+            {
+                for (int brickY = lowerBrick.y; brickY <= upperBrick.y; brickY++)
+                {
+                    for (int brickX = lowerBrick.x; brickX <= upperBrick.x; brickX++)
+                    {
+                        int3 brickCoord = new int3(brickX, brickY, brickZ);
+                        if (!TryGetVoxelBrick(target, brickCoord, out VoxelBrickView brick))
+                        {
+                            continue;
+                        }
+
+                        int3 brickOrigin = brickCoord * Sector.SIZE_IN_BLOCKS;
+                        int3 localLower = math.max(lower - brickOrigin, int3.zero);
+                        int3 localUpper = math.min(
+                            upper - brickOrigin, new int3(Sector.BRICK_MASK));
+                        for (int z = localLower.z; z <= localUpper.z; z++)
+                        {
+                            for (int y = localLower.y; y <= localUpper.y; y++)
+                            {
+                                for (int x = localLower.x; x <= localUpper.x; x++)
+                                {
+                                    int voxelIndex = Sector.ToBlockIdx(x, y, z);
+                                    if (!BrickBitmask.GetBit(brick.OccupiedMask, voxelIndex))
+                                    {
+                                        continue;
+                                    }
+
+                                    // Key-key pairs were already emitted by the A-side pass.
+                                    if (isSourceFromB &&
+                                        BrickBitmask.GetBit(brick.PhysicsKeyMask, voxelIndex))
+                                    {
+                                        continue;
+                                    }
+
+                                    int3 targetCoord = brickOrigin + new int3(x, y, z);
+                                    PhysicsInfo targetInfo = brick.Physics[voxelIndex];
+                                    EmitVoxelPairContact(
+                                        isSourceFromB ? targetCoord : sourceCoord,
+                                        isSourceFromB ? targetInfo : sourceInfo,
+                                        isSourceFromB ? sourceCoord : targetCoord,
+                                        isSourceFromB ? sourceInfo : targetInfo,
+                                        bFromA, aFromB, maxDistance, isSourceFromB,
+                                        sourceFeatures, sourceFeatureCount, sourceVertices,
+                                        ref contacts);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Probes every candidate cell of the opposite body within the window around one source
         // key block and appends the surviving finite-feature contacts. Pair math always runs in B
         // grid space with fixed A/B roles, so both passes emit identical contacts for identical pairs.
@@ -718,26 +836,10 @@ namespace Unity.Physics
                     sourceMinimum, sourceMaximum, roundedReach,
                     out int3 lo, out int3 hi);
 
-                for (int bz = lo.z; bz <= hi.z; bz++)
-                {
-                    for (int by = lo.y; by <= hi.y; by++)
-                    {
-                        for (int bx = lo.x; bx <= hi.x; bx++)
-                        {
-                            int3 cellCoord = new int3(bx, by, bz);
-                            voxelB->GetBlockAndPhysicsInfo(cellCoord, out Block cellBlock, out PhysicsInfo infoB);
-                            if (cellBlock.isEmpty)
-                            {
-                                continue;
-                            }
-
-                            EmitVoxelPairContact(
-                                sourceCoord, sourceInfo, cellCoord, infoB,
-                                bFromA, aFromB, maxDistance, false,
-                                sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
-                        }
-                    }
-                }
+                ProbeCandidateRange(
+                    lo, hi, voxelB, sourceCoord, sourceInfo,
+                    bFromA, aFromB, maxDistance, false,
+                    sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
             }
             else
             {
@@ -749,32 +851,10 @@ namespace Unity.Physics
                     sourceMinimum, sourceMaximum, roundedReach,
                     out int3 lo, out int3 hi);
 
-                for (int az = lo.z; az <= hi.z; az++)
-                {
-                    for (int ay = lo.y; ay <= hi.y; ay++)
-                    {
-                        for (int ax = lo.x; ax <= hi.x; ax++)
-                        {
-                            int3 voxelCoordA = new int3(ax, ay, az);
-                            voxelA->GetBlockAndPhysicsInfo(voxelCoordA, out Block aBlock, out PhysicsInfo infoA);
-                            if (aBlock.isEmpty)
-                            {
-                                continue;
-                            }
-
-                            // Key-key pairs were already emitted by the A-side pass.
-                            if (infoA.IsPhysicsKey)
-                            {
-                                continue;
-                            }
-
-                            EmitVoxelPairContact(
-                                voxelCoordA, infoA, sourceCoord, sourceInfo,
-                                bFromA, aFromB, maxDistance, true,
-                                sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
-                        }
-                    }
-                }
+                ProbeCandidateRange(
+                    lo, hi, voxelA, sourceCoord, sourceInfo,
+                    bFromA, aFromB, maxDistance, true,
+                    sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
             }
         }
 

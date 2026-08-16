@@ -79,51 +79,6 @@ namespace Unity.Physics
             return Math.TransformAabb(localAabb, transform, uniformScale);
         }
 
-        #region Voxel Slot Queries
-
-        // Direct global-block-coordinate reads through the m_Sectors hashmap, mirroring
-        // VoxelEntityData.GetSlot. Narrowphase probes with these instead of pre-resolving
-        // sectors, so windows cross sector boundaries transparently.
-        // TODO: Put a per-thread sector/brick cache in front of the hashmap lookup;
-        // narrowphase probes cluster heavily inside one sector/brick.
-
-        /// <summary>
-        /// Reads one slot value at a global block position. Returns default when no sector,
-        /// brick, or slot storage exists there.
-        /// </summary>
-        public T GetSlot<T>(SectorSlotId slotId, int3 blockPos) where T : unmanaged
-        {
-            int3 sectorCoord = blockPos >> (Sector.SHIFT_IN_BLOCKS + Sector.SHIFT_IN_BRICKS);
-            if (!m_Sectors.TryGetValue(sectorCoord, out SectorHandle handle) || handle.IsNull)
-            {
-                return default;
-            }
-
-            int3 local = blockPos & (Sector.SECTOR_SIZE_IN_BLOCKS - 1);
-            return handle.GetSlot<T>(slotId, local.x, local.y, local.z);
-        }
-
-        /// <summary>
-        /// Reads the Block and PhysicsInfo slots of one voxel at a global block position,
-        /// resolving the owning sector and brick once for both values. Missing sector, brick,
-        /// or slot storage yields defaults (empty block, interior info) and false.
-        /// </summary>
-        public bool GetBlockAndPhysicsInfo(int3 blockPos, out Block block, out PhysicsInfo info)
-        {
-            int3 sectorCoord = blockPos >> (Sector.SHIFT_IN_BLOCKS + Sector.SHIFT_IN_BRICKS);
-            if (!m_Sectors.TryGetValue(sectorCoord, out SectorHandle handle) || handle.IsNull)
-            {
-                block = default;
-                info = default;
-                return false;
-            }
-
-            int3 local = blockPos & (Sector.SECTOR_SIZE_IN_BLOCKS - 1);
-            return handle.Ptr->GetBlockAndPhysicsInfo(local.x, local.y, local.z, out block, out info);
-        }
-
-        #endregion
-
         #region Query Methods
 
         public bool CastRay(RaycastInput input)
