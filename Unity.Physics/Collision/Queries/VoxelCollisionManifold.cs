@@ -915,6 +915,8 @@ namespace Unity.Physics
                             featureA, featureB, verticesA, verticesB,
                             bFromA, aFromB, out candidate))
                     {
+                        // TODO: Get rid of general GJK.
+                        // Do specific queries dispatched by feature type for better performance.
                         candidate = DistanceQueries.ConvexConvex(
                             verticesA + featureA.VertexOffset,
                             featureA.VertexCount,
@@ -1011,7 +1013,7 @@ namespace Unity.Physics
                 };
 
 #if SHOW_DEBUG
-                Debug.DrawRay(Mul(worldFromB, contact.PosInB), manifold.Normal * 0.5f * (-contact.Distance) * 100.0f,
+                Debug.DrawRay(Mul(worldFromB, contact.PosInB), manifold.Normal * 0.5f,// * (-contact.Distance) * 100.0f,
                     contact.Distance > 0 ? Color.cyan : Color.red, 0.0f, false);
 #endif
 
