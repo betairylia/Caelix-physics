@@ -29,10 +29,16 @@ namespace Unity.Physics
         //   * every feature is finite, so ownership changes clamp to a shared edge or point instead
         //     of creating or deleting an infinite plane at a footprint threshold.
         //
-        // PhysicsInfo's low seven bits store the occupied positive 2x2x2 octet. Each voxel owns the
-        // point/segment/square/cube features rooted at its center. The narrowphase finds closest
-        // points between these finite convex cores and lets the existing convex-distance query add
-        // the two 0.5 radii. This is an analytic local distance field, not a sampled SDF.
+        // PhysicsInfo stores one bit per cell of that complex ROOTED at the voxel and surviving
+        // dedup: bits 0-6 keep the positive octet order (+X, +Y, +Z, +XY, +XZ, +YZ, +XYZ) and bit 7
+        // marks the bare point. VoxelisX already dropped every cell contained in one rooted at a
+        // backward neighbor, so the bits are read directly, a voxel roots at most three cells, and a
+        // voxel whose byte is zero (PhysicsInfo.IsInterior) roots nothing and is skipped entirely --
+        // the cell covering it is rooted at a backward neighbor the same probe window reaches, since
+        // GetCandidateVoxelRange already extends one cell towards the negative side. The narrowphase
+        // finds closest points between these finite convex cores and lets the existing
+        // convex-distance query add the two 0.5 radii. This is an analytic local distance field, not
+        // a sampled SDF.
         //
         // This file intentionally contains GENERATION ONLY: every surviving (A voxel, B cell)
         // probe emits one raw contact, written as its own single-point manifold plus one contact
@@ -55,6 +61,14 @@ namespace Unity.Physics
 
         // Current collider model is intentionally fixed to the fully rounded case.
         const float k_VoxelCoreRadius = 0.5f;
+
+        // A deduped voxel roots at most three cells: three squares meeting at the root. A cube or a
+        // bare point excludes every other cell, and a square excludes the edges it contains, so no
+        // configuration reaches four. The vertex budget assumes the worst cell (a cube, 8 vertices)
+        // rather than the worst reachable combination, so a byte from an older layout cannot
+        // overflow the caller's stack buffer.
+        const int k_MaxFeaturesPerVoxel = 3;
+        const int k_MaxVerticesPerVoxel = 8 * k_MaxFeaturesPerVoxel;
 
         // One raw generated contact, in B grid space.
         struct VoxelContact
@@ -223,9 +237,11 @@ namespace Unity.Physics
             features[featureCount++] = feature;
         }
 
-        // Builds the maximal positive cubical cells rooted at one voxel. A point is kept only when
-        // no positive feature starts here. End voxels therefore still represent the last sphere of
-        // a chain, while squares and cubes replace their contained positive edges.
+        // Emits the cells VoxelisX left rooted at this voxel, one feature per set PhysicsInfo bit.
+        // Dedup already removed every cell contained in a larger one, here or at a backward
+        // neighbor, so no containment logic is left to redo. At most three cells survive at one root
+        // (three squares; a cube or a point excludes everything else), which bounds the caller's
+        // stack arrays at 3 features and 12 vertices.
         private static unsafe int BuildCubicCoreFeatures(
             int3 voxelCoord,
             PhysicsInfo info,
@@ -234,90 +250,87 @@ namespace Unity.Physics
             CubicCoreFeature* features,
             float3* vertices)
         {
-            byte occupied = info.ForwardOccupancy;
-            bool edgeX = (occupied & (1 << 0)) != 0;
-            bool edgeY = (occupied & (1 << 1)) != 0;
-            bool edgeZ = (occupied & (1 << 2)) != 0;
-            bool squareXY = edgeX && edgeY && (occupied & (1 << 3)) != 0;
-            bool squareXZ = edgeX && edgeZ && (occupied & (1 << 4)) != 0;
-            bool squareYZ = edgeY && edgeZ && (occupied & (1 << 5)) != 0;
-            bool cube = squareXY && squareXZ && squareYZ && (occupied & (1 << 6)) != 0;
-
             int featureCount = 0;
             int vertexCount = 0;
             float3 voxelCenter = (float3)voxelCoord + 0.5f;
 
-            if (cube)
+            uint remaining = info.data;
+            while (remaining != 0u && featureCount < k_MaxFeaturesPerVoxel)
             {
-                AddCubicCoreFeature(
-                    voxelCenter, 7, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-                return featureCount;
-            }
+                int featureBit = math.tzcnt(remaining);
+                remaining &= remaining - 1u;
 
-            if (squareXY)
-            {
                 AddCubicCoreFeature(
-                    voxelCenter, 3, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-            if (squareXZ)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 5, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-            if (squareYZ)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 6, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-
-            if (edgeX && !squareXY && !squareXZ)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 1, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-            if (edgeY && !squareXY && !squareYZ)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 2, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-            if (edgeZ && !squareXZ && !squareYZ)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 4, transformFromA, bFromA,
-                    features, ref featureCount, vertices, ref vertexCount);
-            }
-
-            if (featureCount == 0)
-            {
-                AddCubicCoreFeature(
-                    voxelCenter, 0, transformFromA, bFromA,
+                    voxelCenter,
+                    (byte)PhysicsInfo.AxisMaskFromFeatureBit(featureBit),
+                    transformFromA, bFromA,
                     features, ref featureCount, vertices, ref vertexCount);
             }
 
             return featureCount;
         }
 
-        // Canonical cells use a half-open interval on every positive core axis. A neighboring
-        // feature owns the positive endpoint. End voxels own that point through their point
-        // feature. This removes duplicate seam contacts without changing the geometric distance.
-        private static bool OwnsCorePoint(CubicCoreFeature feature, float3 pointInLocal)
+        // Canonical cells use a half-open interval on every positive core axis, so a point on a
+        // cell's positive boundary belongs to the cell rooted one voxel further along those axes.
+        // That anchor voxel is unique, which is what removes duplicate seam contacts without
+        // changing the geometric distance.
+        //
+        // Dedup can leave the anchor rooting nothing -- the far end of a bar, the rim of a plate --
+        // and then nothing else would claim the point, so the anchor is read and this cell keeps the
+        // point instead. Without that read every feature end would be a hole in the contact surface.
+        // The anchor lookup only runs when a point lands exactly on a positive boundary.
+        private static unsafe bool OwnsCorePoint(
+            CubicCoreFeature feature,
+            float3 pointInLocal,
+            int3 voxelCoord,
+            VoxelCollider* collider)
         {
             const float endpointTolerance = 1e-4f;
             float3 offset = pointInLocal - feature.RootInLocal;
+
+            int forwardAxes = 0;
+            int interiorAxes = 0;
             for (int axis = 0; axis < 3; axis++)
             {
-                if ((feature.AxisMask & (1 << axis)) != 0 && offset[axis] >= 1.0f - endpointTolerance)
+                if ((feature.AxisMask & (1 << axis)) == 0)
                 {
-                    return false;
+                    continue;
+                }
+                if (offset[axis] >= 1.0f - endpointTolerance)
+                {
+                    forwardAxes |= 1 << axis;
+                }
+                else if (offset[axis] > endpointTolerance)
+                {
+                    interiorAxes |= 1 << axis;
                 }
             }
-            return true;
+
+            if (forwardAxes == 0)
+            {
+                return true;
+            }
+
+            int3 anchor = voxelCoord + new int3(
+                forwardAxes & 1, (forwardAxes >> 1) & 1, (forwardAxes >> 2) & 1);
+            return !AnchorRootsCoveringCell(collider, anchor, interiorAxes);
+        }
+
+        // True when the anchor voxel roots a surviving cell that spans every axis the point is
+        // interior along, i.e. when that voxel really does own the point. A missing brick answers
+        // false so the caller keeps the point: a duplicate contact is recoverable, a hole is not.
+        private static unsafe bool AnchorRootsCoveringCell(
+            VoxelCollider* collider, int3 voxelCoord, int interiorAxes)
+        {
+            if (!TryGetVoxelBrick(
+                    collider, voxelCoord >> Sector.SHIFT_IN_BLOCKS, out VoxelBrickView brick))
+            {
+                return false;
+            }
+
+            int3 local = voxelCoord & Sector.BRICK_MASK;
+            return brick.Physics[Sector.ToBlockIdx(local.x, local.y, local.z)]
+                .RootsCellCovering(interiorAxes);
         }
 
         private static unsafe void GetFeatureBounds(
@@ -738,7 +751,8 @@ namespace Unity.Physics
         static unsafe void ProbeCandidateRange(
             int3 lower,
             int3 upper,
-            VoxelCollider* target,
+            VoxelCollider* voxelA,
+            VoxelCollider* voxelB,
             int3 sourceCoord,
             PhysicsInfo sourceInfo,
             in MTransform bFromA,
@@ -750,6 +764,7 @@ namespace Unity.Physics
             float3* sourceVertices,
             ref UnsafeList<VoxelContact> contacts)
         {
+            VoxelCollider* target = isSourceFromB ? voxelA : voxelB;
             int3 lowerBrick = lower >> Sector.SHIFT_IN_BLOCKS;
             int3 upperBrick = upper >> Sector.SHIFT_IN_BLOCKS;
             for (int brickZ = lowerBrick.z; brickZ <= upperBrick.z; brickZ++)
@@ -787,13 +802,22 @@ namespace Unity.Physics
                                         continue;
                                     }
 
-                                    int3 targetCoord = brickOrigin + new int3(x, y, z);
+                                    // Occupied but rooting nothing: a backward neighbor roots the
+                                    // cell that covers this center, and the probe range already
+                                    // extends one cell that way, so the geometry is not lost.
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
+                                    if (targetInfo.IsInterior)
+                                    {
+                                        continue;
+                                    }
+
+                                    int3 targetCoord = brickOrigin + new int3(x, y, z);
                                     EmitVoxelPairContact(
                                         isSourceFromB ? targetCoord : sourceCoord,
                                         isSourceFromB ? targetInfo : sourceInfo,
                                         isSourceFromB ? sourceCoord : targetCoord,
                                         isSourceFromB ? sourceInfo : targetInfo,
+                                        voxelA, voxelB,
                                         bFromA, aFromB, maxDistance, isSourceFromB,
                                         sourceFeatures, sourceFeatureCount, sourceVertices,
                                         ref contacts);
@@ -820,11 +844,17 @@ namespace Unity.Physics
             bool isSourceFromB,
             ref UnsafeList<VoxelContact> contacts)
         {
-            CubicCoreFeature* sourceFeatures = stackalloc CubicCoreFeature[4];
-            float3* sourceVertices = stackalloc float3[24];
+            CubicCoreFeature* sourceFeatures = stackalloc CubicCoreFeature[k_MaxFeaturesPerVoxel];
+            float3* sourceVertices = stackalloc float3[k_MaxVerticesPerVoxel];
             int sourceFeatureCount = BuildCubicCoreFeatures(
                 sourceCoord, sourceInfo, !isSourceFromB, bFromA,
                 sourceFeatures, sourceVertices);
+            if (sourceFeatureCount == 0)
+            {
+                // A key always roots a cell; bail out rather than read empty feature bounds if a
+                // stale key bit ever survives a rebuild.
+                return;
+            }
 
             if (!isSourceFromB)
             {
@@ -837,7 +867,7 @@ namespace Unity.Physics
                     out int3 lo, out int3 hi);
 
                 ProbeCandidateRange(
-                    lo, hi, voxelB, sourceCoord, sourceInfo,
+                    lo, hi, voxelA, voxelB, sourceCoord, sourceInfo,
                     bFromA, aFromB, maxDistance, false,
                     sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
             }
@@ -852,19 +882,25 @@ namespace Unity.Physics
                     out int3 lo, out int3 hi);
 
                 ProbeCandidateRange(
-                    lo, hi, voxelA, sourceCoord, sourceInfo,
+                    lo, hi, voxelA, voxelB, sourceCoord, sourceInfo,
                     bFromA, aFromB, maxDistance, true,
                     sourceFeatures, sourceFeatureCount, sourceVertices, ref contacts);
             }
         }
 
-        // Finds the closest pair of finite cubical-core features rooted at these voxels and
-        // appends one contact for the closest pair inside the speculative distance.
+        // Appends one contact per surviving feature pair inside the speculative distance.
+        //
+        // Dedup made the FEATURE, not the voxel, the unit of geometry: an inside corner roots two
+        // segments on one voxel, and keeping only the closest pair would drop one of the two
+        // distinct support normals. Pairs that resolve to the same point and normal -- two cells of
+        // one root meeting on a shared edge -- are still emitted once.
         static unsafe void EmitVoxelPairContact(
             int3 voxelCoordA,
             PhysicsInfo infoA,
             int3 voxelCoordB,
             PhysicsInfo infoB,
+            VoxelCollider* voxelA,
+            VoxelCollider* voxelB,
             in MTransform bFromA,
             in MTransform aFromB,
             float maxDistance,
@@ -874,8 +910,8 @@ namespace Unity.Physics
             float3* sourceVertices,
             ref UnsafeList<VoxelContact> contacts)
         {
-            CubicCoreFeature* targetFeatures = stackalloc CubicCoreFeature[4];
-            float3* targetVertices = stackalloc float3[24];
+            CubicCoreFeature* targetFeatures = stackalloc CubicCoreFeature[k_MaxFeaturesPerVoxel];
+            float3* targetVertices = stackalloc float3[k_MaxVerticesPerVoxel];
             int targetFeatureCount = BuildCubicCoreFeatures(
                 isSourceFromB ? voxelCoordA : voxelCoordB,
                 isSourceFromB ? infoA : infoB,
@@ -891,10 +927,10 @@ namespace Unity.Physics
             int featureCountA = isSourceFromB ? targetFeatureCount : sourceFeatureCount;
             int featureCountB = isSourceFromB ? sourceFeatureCount : targetFeatureCount;
 
-            float bestDistance = float.MaxValue;
             float maxCoreDistance = math.max(0.0f, 2.0f * k_VoxelCoreRadius + maxDistance);
             float maxCoreDistanceSq = maxCoreDistance * maxCoreDistance;
-            DistanceQueries.Result best = default;
+
+            int emitted = 0;
             for (int i = 0; i < featureCountA; i++)
             {
                 CubicCoreFeature featureA = featuresA[i];
@@ -927,45 +963,61 @@ namespace Unity.Physics
                             MTransform.Identity);
                     }
 
-                    float3 corePointAinB = candidate.PositionOnAinA +
-                                           candidate.NormalInA * k_VoxelCoreRadius;
-                    float3 corePointBinB = candidate.PositionOnBinA -
-                                           candidate.NormalInA * k_VoxelCoreRadius;
-                    bool sourceOwnsPoint = isSourceFromB
-                        ? OwnsCorePoint(featureB, corePointBinB)
-                        : OwnsCorePoint(featureA, Mul(aFromB, corePointAinB));
-                    bool targetOwnsPoint = isSourceFromB
-                        ? OwnsCorePoint(featureA, Mul(aFromB, corePointAinB))
-                        : OwnsCorePoint(featureB, corePointBinB);
-                    if (!sourceOwnsPoint || !targetOwnsPoint)
+                    if (candidate.Distance >= maxDistance || !math.isfinite(candidate.Distance) ||
+                        !math.all(math.isfinite(candidate.NormalInA)) ||
+                        !math.all(math.isfinite(candidate.PositionOnBinA)))
                     {
                         continue;
                     }
 
-                    if (candidate.Distance < bestDistance)
+                    float3 corePointAinB = candidate.PositionOnAinA +
+                                           candidate.NormalInA * k_VoxelCoreRadius;
+                    float3 corePointBinB = candidate.PositionOnBinA -
+                                           candidate.NormalInA * k_VoxelCoreRadius;
+                    if (!OwnsCorePoint(featureA, Mul(aFromB, corePointAinB), voxelCoordA, voxelA) ||
+                        !OwnsCorePoint(featureB, corePointBinB, voxelCoordB, voxelB))
                     {
-                        bestDistance = candidate.Distance;
-                        best = candidate;
+                        continue;
                     }
+
+                    var contact = new VoxelContact
+                    {
+                        Distance = candidate.Distance,
+                        NormalInB = candidate.NormalInA,
+                        PosInB = candidate.PositionOnBinA,
+                        VoxelA = voxelCoordA,
+                        VoxelB = voxelCoordB,
+                        normalBin = 0
+                    };
+
+                    if (IsDuplicateOfRecent(contacts, emitted, contact))
+                    {
+                        continue;
+                    }
+
+                    contacts.Add(contact);
+                    emitted++;
                 }
             }
+        }
 
-            if (bestDistance >= maxDistance || !math.isfinite(bestDistance) ||
-                !math.all(math.isfinite(best.NormalInA)) ||
-                !math.all(math.isfinite(best.PositionOnBinA)))
+        // Two cells of the same root can meet on a shared edge and report the identical closest
+        // point. Only the contacts this voxel pair just appended can collide that way, so the scan
+        // stays at the tail of the list.
+        static bool IsDuplicateOfRecent(
+            in UnsafeList<VoxelContact> contacts, int recentCount, in VoxelContact candidate)
+        {
+            const float duplicateTolerance = 1e-4f;
+            for (int i = contacts.Length - recentCount; i < contacts.Length; i++)
             {
-                return;
+                VoxelContact existing = contacts[i];
+                if (math.all(math.abs(existing.PosInB - candidate.PosInB) < duplicateTolerance) &&
+                    math.all(math.abs(existing.NormalInB - candidate.NormalInB) < duplicateTolerance))
+                {
+                    return true;
+                }
             }
-
-            contacts.Add(new VoxelContact
-            {
-                Distance = bestDistance,
-                NormalInB = best.NormalInA,
-                PosInB = best.PositionOnBinA,
-                VoxelA = voxelCoordA,
-                VoxelB = voxelCoordB,
-                normalBin = 0
-            });
+            return false;
         }
 
         // Writes one single-point manifold and one contact event per raw contact. No merging,
