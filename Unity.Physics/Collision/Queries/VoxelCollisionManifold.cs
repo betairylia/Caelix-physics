@@ -29,25 +29,41 @@ namespace Unity.Physics
         //   * every feature is finite, so ownership changes clamp to a shared edge or point instead
         //     of creating or deleting an infinite plane at a footprint threshold.
         //
-        // PhysicsInfo stores one bit per cell of that complex ROOTED at the voxel and surviving
-        // dedup: bits 0-6 keep the positive octet order (+X, +Y, +Z, +XY, +XZ, +YZ, +XYZ) and bit 7
-        // marks the bare point. VoxelisX already dropped every cell contained in one rooted at a
-        // backward neighbor, so the bits are read directly, a voxel roots at most three cells, and a
-        // voxel whose byte is zero (PhysicsInfo.IsInterior) roots nothing and is skipped entirely --
-        // the cell covering it is rooted at a backward neighbor the same probe window reaches, since
-        // GetCandidateVoxelRange already extends one cell towards the negative side. The narrowphase
-        // finds closest points between these finite convex cores and lets the existing
-        // convex-distance query add the two 0.5 radii. This is an analytic local distance field, not
-        // a sampled SDF.
+        // PhysicsInfo stores one bit per cell of that complex ROOTED at the voxel and COLLISION-
+        // ACTIVE: bits 0-6 keep the positive octet order (+X, +Y, +Z, +XY, +XZ, +YZ, +XYZ) and bit 7
+        // marks the bare point. A cell is active when it owns an outward direction that no cell
+        // containing it owns, so flat subdivision edges and vertices are gone while rims, creases,
+        // corners, wire ends and sheet faces remain. Bit 6 (the cube) is a VOLUME cell and never a
+        // surface feature; a voxel that roots only the cube is deep inside solid and is skipped
+        // (PhysicsInfo.IsInterior). The narrowphase finds closest points between these finite convex
+        // cores and lets the existing convex-distance query add the two 0.5 radii. This is an
+        // analytic local distance field, not a sampled SDF.
         //
-        // This file intentionally contains GENERATION ONLY: every surviving (A voxel, B cell)
-        // probe emits one raw contact, written as its own single-point manifold plus one contact
-        // event. Canonical half-open cells remove exact seam duplicates. There is no patch merging
-        // or reduction. The previous
-        // merging / joint extraction stages (per-(A voxel, sign class) keep-deepest buckets,
-        // fusion of opposing contacts into bilateral equality points, per-axis manifold merging,
-        // rim/extreme reduction) were removed 2026-07 to make room for a new patch-based merging
-        // algorithm; see git history for the old implementation.
+        // Only four unordered core-feature pairs are dispatched: vertex-vertex, vertex-edge,
+        // vertex-face and edge-edge. Face-face and edge-face are omitted because for two overlapping
+        // finite patches the corners of the overlap are always a vertex of one patch inside the
+        // other, or a crossing of two boundary edges. That restriction, not any direction test, is
+        // what keeps a flat resting patch from producing one contact per tile pair.
+        //
+        // NOT PRESENT YET, deliberately (v1 of the active-feature scheme):
+        //   * no direction / normal-cone gate, so a feature buried under a coplanar neighbor can
+        //     still report a tilted contact;
+        //   * no canonical seam ownership (k_EnableSeamOwnership is off), so a witness on a shared
+        //     boundary is reported once per cell that touches it.
+        // Both omissions only ADD contacts. Generation stays conservative: the union of the emitted
+        // constraints is still exactly the non-penetration condition, and no configuration loses a
+        // contact it would otherwise have. Removing the duplicates is the merging stage's job.
+        //
+        // This file intentionally contains GENERATION ONLY: every surviving (A cell, B cell) probe
+        // emits one raw contact, written as its own single-point manifold plus one contact event.
+        // There is no patch merging or reduction. The previous merging / joint extraction stages
+        // (per-(A voxel, sign class) keep-deepest buckets, fusion of opposing contacts into
+        // bilateral equality points, per-axis manifold merging, rim/extreme reduction) were removed
+        // 2026-07 to make room for a new patch-based merging algorithm; see git history.
+        //
+        // Containment and deep overlap are NOT covered. Cube cells are excluded from the pair set,
+        // so a body buried more than a voxel inside another finds no nearby surface feature and
+        // generates nothing. That needs the separate volume path.
         //
         // Conventions (matching the rest of the narrowphase):
         //   * Manifold normals point from B towards A; positive contact distance is separation.
@@ -62,13 +78,19 @@ namespace Unity.Physics
         // Current collider model is intentionally fixed to the fully rounded case.
         const float k_VoxelCoreRadius = 0.5f;
 
-        // A deduped voxel roots at most three cells: three squares meeting at the root. A cube or a
-        // bare point excludes every other cell, and a square excludes the edges it contains, so no
-        // configuration reaches four. The vertex budget assumes the worst cell (a cube, 8 vertices)
-        // rather than the worst reachable combination, so a byte from an older layout cannot
-        // overflow the caller's stack buffer.
-        const int k_MaxFeaturesPerVoxel = 3;
-        const int k_MaxVerticesPerVoxel = 8 * k_MaxFeaturesPerVoxel;
+        // A root can carry every surface cell at once: the minimum corner voxel of a solid box roots
+        // three boundary faces, three convex edges and the corner point. The cube bit is excluded
+        // from the surface path, so seven is the bound and four (a square) is the worst vertex count
+        // per feature. Sizing by the worst feature rather than the worst reachable combination means
+        // a byte from an older layout cannot overflow the caller's stack buffer.
+        const int k_MaxFeaturesPerVoxel = PhysicsInfo.SurfaceFeatureBitCount;
+        const int k_MaxVerticesPerVoxel = 4 * k_MaxFeaturesPerVoxel;
+
+        // Seam ownership: a witness on a cell's positive boundary belongs to the cell rooted one
+        // voxel further along. Disabled for v1 of the active-feature scheme, so a shared boundary is
+        // reported once per touching cell. Turning it back on needs its lookup rules re-checked
+        // against active features first -- see OwnsCorePoint.
+        const bool k_EnableSeamOwnership = false;
 
         // One raw generated contact, in B grid space.
         struct VoxelContact
@@ -237,11 +259,12 @@ namespace Unity.Physics
             features[featureCount++] = feature;
         }
 
-        // Emits the cells VoxelisX left rooted at this voxel, one feature per set PhysicsInfo bit.
-        // Dedup already removed every cell contained in a larger one, here or at a backward
-        // neighbor, so no containment logic is left to redo. At most three cells survive at one root
-        // (three squares; a cube or a point excludes everything else), which bounds the caller's
-        // stack arrays at 3 features and 12 vertices.
+        // Emits the active surface cells rooted at this voxel, one feature per set PhysicsInfo bit.
+        // The cube bit is masked off: it is a volume cell, it takes part in no permitted pair, and
+        // building it would put an 8-vertex feature into a 4-vertex-per-feature budget. Active cells
+        // may overlap geometrically -- a box corner roots a point that lies on three edges that lie
+        // on three faces -- which is intended: the lower-dimensional ones exist so a permitted pair
+        // can be formed at all.
         private static unsafe int BuildCubicCoreFeatures(
             int3 voxelCoord,
             PhysicsInfo info,
@@ -254,7 +277,7 @@ namespace Unity.Physics
             int vertexCount = 0;
             float3 voxelCenter = (float3)voxelCoord + 0.5f;
 
-            uint remaining = info.data;
+            uint remaining = (uint)(info.data & PhysicsInfo.SurfaceFeatureMask);
             while (remaining != 0u && featureCount < k_MaxFeaturesPerVoxel)
             {
                 int featureBit = math.tzcnt(remaining);
@@ -275,16 +298,27 @@ namespace Unity.Physics
         // That anchor voxel is unique, which is what removes duplicate seam contacts without
         // changing the geometric distance.
         //
-        // Dedup can leave the anchor rooting nothing -- the far end of a bar, the rim of a plate --
-        // and then nothing else would claim the point, so the anchor is read and this cell keeps the
-        // point instead. Without that read every feature end would be a hole in the contact surface.
-        // The anchor lookup only runs when a point lands exactly on a positive boundary.
+        // The anchor can root nothing -- the far end of a bar, the rim of a plate -- and then nothing
+        // else would claim the point, so the anchor is read and this cell keeps the point instead.
+        // Without that read every feature end would be a hole in the contact surface. The anchor
+        // lookup only runs when a point lands exactly on a positive boundary.
+        //
+        // OFF in v1 (k_EnableSeamOwnership). Two things must be re-checked before it comes back:
+        // active features at one root overlap geometrically, so "the anchor roots a covering cell"
+        // is no longer the same question as "the anchor can emit this contact"; and a covering cell
+        // that forms no permitted pair with the source would claim a point it cannot report, which
+        // turns a duplicate into a hole. CoverMaskForAxes already excludes the cube for that reason.
         private static unsafe bool OwnsCorePoint(
             CubicCoreFeature feature,
             float3 pointInLocal,
             int3 voxelCoord,
             VoxelCollider* collider)
         {
+            if (!k_EnableSeamOwnership)
+            {
+                return true;
+            }
+
             const float endpointTolerance = 1e-4f;
             float3 offset = pointInLocal - feature.RootInLocal;
 
@@ -465,15 +499,16 @@ namespace Unity.Physics
         //
         //   Pass 1 (A-side): every allocated brick of A inside B's reach conservatively marks
         //   the allocated B bricks it may pair with, then each of the brick's physics-KEY
-        //   blocks (Corner/Edge) probes the B cells within its window.
+        //   blocks probes the B cells within its window.
         //   Pass 2 (B-side): the key blocks of every marked B brick probe A's cells the same
         //   way, skipping A-key targets — those pairs were already emitted by pass 1.
         //
-        // Corner and edge blocks remain the sparse contact sources. Every probed target block can
-        // contribute its finite point/segment/square/cube core, so broad flat targets stay flat
-        // without making every face voxel a source. The two passes make either body's sparse keys
-        // available as sources. Probes read the opposite body through its sector map directly, so
-        // windows cross sector boundaries without a per-sector-pair loop.
+        // A key block is a root carrying an active point or an active edge. That is exactly the
+        // source set the permitted pairs need: every one of them has a vertex or an edge on at least
+        // one side, so a face-only root is always a target and never a source. The two passes
+        // together cover (A-key, any B) and (non-A-key A, B-key); the only pair they cannot reach is
+        // face-face, which is not dispatched anyway. Probes read the opposite body through its
+        // sector map directly, so windows cross sector boundaries without a per-sector-pair loop.
         static unsafe void CollectVoxelContacts(
             VoxelCollider* voxelA,
             VoxelCollider* voxelB,
@@ -802,11 +837,13 @@ namespace Unity.Physics
                                         continue;
                                     }
 
-                                    // Occupied but rooting nothing: a backward neighbor roots the
-                                    // cell that covers this center, and the probe range already
-                                    // extends one cell that way, so the geometry is not lost.
+                                    // Occupied but rooting no active surface cell: either deep inside
+                                    // solid (only the volume cube bit is set) or fully absorbed by
+                                    // its neighbors. Either way a nearer cell carries this center's
+                                    // geometry, and the probe range already extends one cell towards
+                                    // the negative side to reach it.
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
-                                    if (targetInfo.IsInterior)
+                                    if (!targetInfo.HasSurfaceFeatures)
                                     {
                                         continue;
                                     }
@@ -888,12 +925,31 @@ namespace Unity.Physics
             }
         }
 
-        // Appends one contact per surviving feature pair inside the speculative distance.
+        // True for the four unordered core-feature pairs the normal contact path dispatches:
+        // vertex-vertex, vertex-edge, vertex-face and edge-edge. Dimension is the popcount of the
+        // axis mask, so 0 is a point, 1 a segment and 2 a square; the cube never reaches here.
         //
-        // Dedup made the FEATURE, not the voxel, the unit of geometry: an inside corner roots two
-        // segments on one voxel, and keeping only the closest pair would drop one of the two
-        // distinct support normals. Pairs that resolve to the same point and normal -- two cells of
-        // one root meeting on a shared edge -- are still emitted once.
+        // Face-face and edge-face are omitted on purpose. For two overlapping finite patches the
+        // corners of the overlap region are always a vertex of one patch lying inside the other, or
+        // a crossing of two boundary edges, so this set still reaches every corner of a resting
+        // patch -- while a face pair would fire once per overlapping tile pair.
+        static bool IsPermittedFeaturePair(byte axisMaskA, byte axisMaskB)
+        {
+            int dimensionA = math.countbits((uint)axisMaskA);
+            int dimensionB = math.countbits((uint)axisMaskB);
+            if (dimensionA > 2 || dimensionB > 2)
+            {
+                return false;
+            }
+            return dimensionA == 0 || dimensionB == 0 || (dimensionA == 1 && dimensionB == 1);
+        }
+
+        // Appends one contact per permitted feature pair inside the speculative distance.
+        //
+        // The FEATURE, not the voxel, is the unit of geometry: an inside corner roots two segments
+        // on one voxel, and keeping only the closest pair would drop one of the two distinct support
+        // normals. Pairs that resolve to the same point and normal -- two cells of one root meeting
+        // on a shared edge -- are still emitted once.
         static unsafe void EmitVoxelPairContact(
             int3 voxelCoordA,
             PhysicsInfo infoA,
@@ -937,6 +993,11 @@ namespace Unity.Physics
                 for (int j = 0; j < featureCountB; j++)
                 {
                     CubicCoreFeature featureB = featuresB[j];
+                    if (!IsPermittedFeaturePair(featureA.AxisMask, featureB.AxisMask))
+                    {
+                        continue;
+                    }
+
                     float3 aabbGap = math.max(
                         math.max(featureA.MinInB - featureB.MaxInB,
                                  featureB.MinInB - featureA.MaxInB),
