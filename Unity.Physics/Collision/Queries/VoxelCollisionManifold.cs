@@ -1,5 +1,6 @@
 #define SHOW_DEBUG
 
+using System.Runtime.CompilerServices;
 using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -113,6 +114,9 @@ namespace Unity.Physics
             public int VertexOffset;
             public int VertexCount;
             public byte AxisMask;
+            // Popcount of AxisMask, cached at build time because the pair filter reads it on every
+            // iteration of the feature loop.
+            public byte Dimension;
             public float3 RootInLocal;
             public float3 MinInB;
             public float3 MaxInB;
@@ -232,6 +236,7 @@ namespace Unity.Physics
                 VertexOffset = vertexCount,
                 VertexCount = 0,
                 AxisMask = axisMask,
+                Dimension = (byte)math.countbits((uint)axisMask),
                 RootInLocal = voxelCenter,
                 MinInB = new float3(float.MaxValue),
                 MaxInB = new float3(float.MinValue)
@@ -848,6 +853,14 @@ namespace Unity.Physics
                                         continue;
                                     }
 
+                                    // No permitted feature pair can exist between these two roots, so
+                                    // skip before building the target's features and transforming its
+                                    // vertices. Two byte reads decide it.
+                                    if (!CanRootsFormPermittedPair(sourceInfo, targetInfo))
+                                    {
+                                        continue;
+                                    }
+
                                     int3 targetCoord = brickOrigin + new int3(x, y, z);
                                     EmitVoxelPairContact(
                                         isSourceFromB ? targetCoord : sourceCoord,
@@ -925,23 +938,39 @@ namespace Unity.Physics
             }
         }
 
-        // True for the four unordered core-feature pairs the normal contact path dispatches:
-        // vertex-vertex, vertex-edge, vertex-face and edge-edge. Dimension is the popcount of the
-        // axis mask, so 0 is a point, 1 a segment and 2 a square; the cube never reaches here.
+        // The four unordered core-feature pairs the normal contact path dispatches -- vertex-vertex,
+        // vertex-edge, vertex-face and edge-edge -- are exactly the pairs whose dimensions sum to at
+        // most two. Dimension is the popcount of the axis mask, so a point is 0, a segment 1, a
+        // square 2 and a cube 3:
+        //
+        //   V-V 0  V-E 1  V-F 2  E-E 2   permitted
+        //   E-F 3  F-F 4  cube 3+        rejected
         //
         // Face-face and edge-face are omitted on purpose. For two overlapping finite patches the
         // corners of the overlap region are always a vertex of one patch lying inside the other, or
         // a crossing of two boundary edges, so this set still reaches every corner of a resting
         // patch -- while a face pair would fire once per overlapping tile pair.
-        static bool IsPermittedFeaturePair(byte axisMaskA, byte axisMaskB)
+        const int k_MaxPermittedDimensionSum = 2;
+
+        // Cheapest possible rejection, decided from two PhysicsInfo bytes before a single feature or
+        // vertex is built. The lowest dimension a root carries bounds every pair it can take part in,
+        // so if the two minima already exceed the budget no feature pair can fit either.
+        //
+        // This is what keeps a flat rest cheap. A rim source carries only edges (minimum 1) and a
+        // flat interior target carries only faces (minimum 2), so 1 + 2 > 2 rejects the whole voxel
+        // pair -- no feature build, no vertex transforms, no pair loop. Only a source that carries an
+        // actual vertex, i.e. a geometric corner, pays for a flat target.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static bool CanRootsFormPermittedPair(PhysicsInfo source, PhysicsInfo target)
         {
-            int dimensionA = math.countbits((uint)axisMaskA);
-            int dimensionB = math.countbits((uint)axisMaskB);
-            if (dimensionA > 2 || dimensionB > 2)
-            {
-                return false;
-            }
-            return dimensionA == 0 || dimensionB == 0 || (dimensionA == 1 && dimensionB == 1);
+            return source.MinSurfaceFeatureDimension() + target.MinSurfaceFeatureDimension()
+                   <= k_MaxPermittedDimensionSum;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static bool IsPermittedFeaturePair(in CubicCoreFeature featureA, in CubicCoreFeature featureB)
+        {
+            return featureA.Dimension + featureB.Dimension <= k_MaxPermittedDimensionSum;
         }
 
         // Appends one contact per permitted feature pair inside the speculative distance.
@@ -986,14 +1015,26 @@ namespace Unity.Physics
             float maxCoreDistance = math.max(0.0f, 2.0f * k_VoxelCoreRadius + maxDistance);
             float maxCoreDistanceSq = maxCoreDistance * maxCoreDistance;
 
+            // Lowest dimension on the B side bounds every pair an A feature can join, so an A
+            // feature that cannot fit the budget against even the smallest B feature is skipped
+            // whole. A flat target carries only squares, so a corner source runs its point against
+            // them and skips its three edges and three squares without entering the inner loop.
+            // featuresB always belongs to body B's voxel, in both pass directions.
+            int minDimensionB = infoB.MinSurfaceFeatureDimension();
+
             int emitted = 0;
             for (int i = 0; i < featureCountA; i++)
             {
                 CubicCoreFeature featureA = featuresA[i];
+                if (featureA.Dimension + minDimensionB > k_MaxPermittedDimensionSum)
+                {
+                    continue;
+                }
+
                 for (int j = 0; j < featureCountB; j++)
                 {
                     CubicCoreFeature featureB = featuresB[j];
-                    if (!IsPermittedFeaturePair(featureA.AxisMask, featureB.AxisMask))
+                    if (!IsPermittedFeaturePair(featureA, featureB))
                     {
                         continue;
                     }
