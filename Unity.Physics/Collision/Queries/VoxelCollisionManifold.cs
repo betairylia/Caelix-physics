@@ -46,6 +46,14 @@ namespace Unity.Physics
         // other, or a crossing of two boundary edges. That restriction, not any direction test, is
         // what keeps a flat resting patch from producing one contact per tile pair.
         //
+        // Active cells rooted at one voxel overlap on purpose -- a solid box corner roots a point
+        // lying on three segments lying on three squares -- so the pair loop then keeps only the
+        // MAXIMAL permitted pairs of the two roots. Containment between two cells of the same root
+        // means the smaller one's constraint is already implied, and the containing cell is built
+        // from the same byte in the same loop, so the duplicate is dropped with no risk of a hole.
+        // That takes a vertex source against a solid box corner from seven pairs down to three.
+        // It does NOT touch duplicates across different roots, which are the seam's problem.
+        //
         // NOT PRESENT YET, deliberately (v1 of the active-feature scheme):
         //   * no direction / normal-cone gate, so a feature buried under a coplanar neighbor can
         //     still report a tilted contact;
@@ -117,6 +125,9 @@ namespace Unity.Physics
             // Popcount of AxisMask, cached at build time because the pair filter reads it on every
             // iteration of the feature loop.
             public byte Dimension;
+            // 1 << the PhysicsInfo feature bit this cell came from. Cached for the same reason: the
+            // maximality filter tests it against a mask from the opposite root on every iteration.
+            public byte FeatureBitMask;
             public float3 RootInLocal;
             public float3 MinInB;
             public float3 MaxInB;
@@ -237,6 +248,7 @@ namespace Unity.Physics
                 VertexCount = 0,
                 AxisMask = axisMask,
                 Dimension = (byte)math.countbits((uint)axisMask),
+                FeatureBitMask = (byte)(1 << PhysicsInfo.FeatureBitFromAxisMask(axisMask)),
                 RootInLocal = voxelCenter,
                 MinInB = new float3(float.MaxValue),
                 MaxInB = new float3(float.MinValue)
@@ -967,10 +979,29 @@ namespace Unity.Physics
                    <= k_MaxPermittedDimensionSum;
         }
 
+        // Same-root maximality masks for one voxel, packed one byte per dimension budget so the pair
+        // loop reads them with a shift and an AND. Budget b sits in byte b, and b is always
+        // k_MaxPermittedDimensionSum minus the opposite feature's dimension, i.e. 0, 1 or 2.
+        //
+        // A cell contained in another cell of the SAME root produces a constraint that the containing
+        // cell's constraint already implies, so its pair is pure duplication. Both cells come from the
+        // same PhysicsInfo byte, so the dominating pair is always enumerated in the same loop below --
+        // dropping the dominated one can never open a hole. See PhysicsInfo.MaximalFeatureMask.
+        //
+        // The mask only ever contains cells of dimension at most b, so testing a feature against it
+        // also decides the permitted-pair rule; no separate dimension-sum test is needed.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static bool IsPermittedFeaturePair(in CubicCoreFeature featureA, in CubicCoreFeature featureB)
+        static uint PackMaximalFeatureMasks(PhysicsInfo info)
         {
-            return featureA.Dimension + featureB.Dimension <= k_MaxPermittedDimensionSum;
+            return info.MaximalFeatureMask(0)
+                   | ((uint)info.MaximalFeatureMask(1) << 8)
+                   | ((uint)info.MaximalFeatureMask(2) << 16);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static byte MaximalFeaturesForBudget(uint packedMasks, int dimensionBudget)
+        {
+            return (byte)(packedMasks >> (dimensionBudget << 3));
         }
 
         // Appends one contact per permitted feature pair inside the speculative distance.
@@ -1015,18 +1046,27 @@ namespace Unity.Physics
             float maxCoreDistance = math.max(0.0f, 2.0f * k_VoxelCoreRadius + maxDistance);
             float maxCoreDistanceSq = maxCoreDistance * maxCoreDistance;
 
-            // Lowest dimension on the B side bounds every pair an A feature can join, so an A
-            // feature that cannot fit the budget against even the smallest B feature is skipped
-            // whole. A flat target carries only squares, so a corner source runs its point against
-            // them and skips its three edges and three squares without entering the inner loop.
+            // Kept pairs are exactly the MAXIMAL permitted pairs. Order two pairs by containment on
+            // both sides at once; the permitted set is closed downwards under that order, so every
+            // rejected pair is implied by a kept one. Growing one side shrinks the other's budget,
+            // which is why the test is two-sided: a pair survives when its A cell is maximal for the
+            // budget its B cell leaves AND its B cell is maximal for the budget its A cell leaves.
+            //
+            // Both masks come from the two PhysicsInfo bytes of this voxel pair, so they are hoisted
+            // out of both loops. The masks carry only cells inside the budget, so the byte test is
+            // also the permitted-pair test. A flat target carries only squares, so a corner source
+            // runs its point against them and skips its own segments and squares outright.
             // featuresB always belongs to body B's voxel, in both pass directions.
-            int minDimensionB = infoB.MinSurfaceFeatureDimension();
+            uint maximalA = PackMaximalFeatureMasks(infoA);
+            uint maximalB = PackMaximalFeatureMasks(infoB);
 
             int emitted = 0;
             for (int i = 0; i < featureCountA; i++)
             {
                 CubicCoreFeature featureA = featuresA[i];
-                if (featureA.Dimension + minDimensionB > k_MaxPermittedDimensionSum)
+                byte allowedB = MaximalFeaturesForBudget(
+                    maximalB, k_MaxPermittedDimensionSum - featureA.Dimension);
+                if (allowedB == 0)
                 {
                     continue;
                 }
@@ -1034,7 +1074,14 @@ namespace Unity.Physics
                 for (int j = 0; j < featureCountB; j++)
                 {
                     CubicCoreFeature featureB = featuresB[j];
-                    if (!IsPermittedFeaturePair(featureA, featureB))
+                    if ((allowedB & featureB.FeatureBitMask) == 0)
+                    {
+                        continue;
+                    }
+
+                    byte allowedA = MaximalFeaturesForBudget(
+                        maximalA, k_MaxPermittedDimensionSum - featureB.Dimension);
+                    if ((allowedA & featureA.FeatureBitMask) == 0)
                     {
                         continue;
                     }
