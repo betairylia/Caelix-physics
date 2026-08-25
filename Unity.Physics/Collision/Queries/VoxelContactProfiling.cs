@@ -27,14 +27,22 @@ namespace Unity.Physics
         /// <remarks>
         /// Counted arithmetically from the window extent, not by iterating, so it still measures the
         /// sweep the query is responsible for after the occupancy mask stopped it from touching
-        /// empty voxels. WindowRoots against OccupiedRoots is therefore the work avoided.
+        /// empty voxels. WindowRoots against TouchedRoots is therefore the work avoided.
         /// </remarks>
         public long WindowRoots;
 
-        /// <summary>Window roots that are actually occupied. These are the only ones touched.</summary>
-        public long OccupiedRoots;
+        /// <summary>
+        /// Window roots the bitmask prefilter admitted, i.e. the only ones actually read.
+        /// </summary>
+        /// <remarks>
+        /// The prefilter differs by query. The vertex query scans the occupancy mask, because any
+        /// occupied root can carry a cell it may pair with. The edge query scans the physics key
+        /// mask instead: a root with an active edge is a contact source by definition, so the key
+        /// mask is a strict superset of its targets and a far sparser one than occupancy.
+        /// </remarks>
+        public long TouchedRoots;
 
-        /// <summary>Occupied roots carrying at least one cell usable by this query.</summary>
+        /// <summary>Touched roots carrying at least one cell usable by this query.</summary>
         public long ActiveRoots;
 
         /// <summary>Closed-form distance evaluations, i.e. candidate feature pairs.</summary>
@@ -68,7 +76,7 @@ namespace Unity.Physics
         {
             Sources += other.Sources;
             WindowRoots += other.WindowRoots;
-            OccupiedRoots += other.OccupiedRoots;
+            TouchedRoots += other.TouchedRoots;
             ActiveRoots += other.ActiveRoots;
             CellTests += other.CellTests;
             RowsTested += other.RowsTested;

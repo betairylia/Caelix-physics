@@ -558,7 +558,7 @@ namespace Unity.Physics
 
                                     int x = rowBit - (y << 3);
                                     int voxelIndex = (z << 6) | rowBit;
-                                    counters.OccupiedRoots++;
+                                    counters.TouchedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
 
@@ -676,19 +676,23 @@ namespace Unity.Physics
                             continue;
                         }
 
-                        // The occupancy mask is one ulong per z slice with bit x + 8y, so a whole
-                        // voxel row of the window is a contiguous bit field and a whole slice is one
-                        // word. Testing those rejects empty space a row or a slice at a time, and
-                        // iterating the surviving bits touches only occupied voxels - the sweep is
-                        // overwhelmingly empty, so per-voxel probing spends nearly all of its work
-                        // on voxels that are not there.
+                        // Scanned against the physics KEY mask, not occupancy. This query only
+                        // wants targets carrying an active edge, and such a root is a contact source
+                        // by definition, so the key mask is a strict superset of them - and a far
+                        // sparser one, because most occupied voxels are plain surface or interior
+                        // and carry no edge at all.
+                        //
+                        // Both masks share the BrickBitmask layout: one ulong per z slice with bit
+                        // x + 8y, so a whole voxel row of the window is a contiguous bit field and a
+                        // whole slice is one word. Testing those rejects empty space a row or a
+                        // slice at a time, and iterating the surviving bits reads only candidates.
                         int3 localSize = localUpper - localLower + 1;
                         ulong rowSelect = ((1UL << localSize.x) - 1UL) << localLower.x;
                         counters.WindowRoots += localSize.x * localSize.y * localSize.z;
 
                         for (int z = localLower.z; z <= localUpper.z; z++)
                         {
-                            ulong slice = brick.OccupiedMask[z];
+                            ulong slice = brick.PhysicsKeyMask[z];
                             if (slice == 0UL)
                             {
                                 counters.RowsTested += localSize.y;
@@ -713,7 +717,7 @@ namespace Unity.Physics
 
                                     int x = rowBit - (y << 3);
                                     int voxelIndex = (z << 6) | rowBit;
-                                    counters.OccupiedRoots++;
+                                    counters.TouchedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
 
