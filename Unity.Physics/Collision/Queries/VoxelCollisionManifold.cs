@@ -329,7 +329,7 @@ namespace Unity.Physics
             byte targetAxisMask,
             float maxDistance,
             int recentCount,
-            ref VoxelContactCounters counters,
+            ref VoxelContactQueryCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             float3 delta = corePointAinB - corePointBinB;
@@ -435,7 +435,7 @@ namespace Unity.Physics
             VoxelCollider* collider,
             int3 globalBrickCoord,
             BrickCacheEntry* cache,
-            ref VoxelContactCounters counters,
+            ref VoxelContactQueryCounters counters,
             out VoxelBrickView view)
         {
             counters.BrickLookups++;
@@ -479,7 +479,7 @@ namespace Unity.Physics
             float maxDistance,
             bool isSourceFromB,
             BrickCacheEntry* cache,
-            ref VoxelContactCounters counters,
+            ref VoxelContactQueryCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             // The source point must itself be maximal for the budget each target dimension leaves.
@@ -516,20 +516,48 @@ namespace Unity.Physics
                         int3 brickOrigin = brickCoord * Sector.SIZE_IN_BLOCKS;
                         int3 localLower = math.max(lower - brickOrigin, int3.zero);
                         int3 localUpper = math.min(upper - brickOrigin, new int3(Sector.BRICK_MASK));
+                        if (math.any(localLower > localUpper))
+                        {
+                            continue;
+                        }
+
+                        // The occupancy mask is one ulong per z slice with bit x + 8y, so a whole
+                        // voxel row of the window is a contiguous bit field and a whole slice is one
+                        // word. Testing those rejects empty space a row or a slice at a time, and
+                        // iterating the surviving bits touches only occupied voxels - the sweep is
+                        // overwhelmingly empty, so per-voxel probing spends nearly all of its work
+                        // on voxels that are not there.
+                        int3 localSize = localUpper - localLower + 1;
+                        ulong rowSelect = ((1UL << localSize.x) - 1UL) << localLower.x;
+                        counters.WindowRoots += localSize.x * localSize.y * localSize.z;
 
                         for (int z = localLower.z; z <= localUpper.z; z++)
                         {
+                            ulong slice = brick.OccupiedMask[z];
+                            if (slice == 0UL)
+                            {
+                                counters.RowsTested += localSize.y;
+                                counters.RowsSkipped += localSize.y;
+                                continue;
+                            }
+
                             for (int y = localLower.y; y <= localUpper.y; y++)
                             {
-                                for (int x = localLower.x; x <= localUpper.x; x++)
+                                counters.RowsTested++;
+                                ulong row = slice & (rowSelect << (y << 3));
+                                if (row == 0UL)
                                 {
-                                    counters.WindowRoots++;
+                                    counters.RowsSkipped++;
+                                    continue;
+                                }
 
-                                    int voxelIndex = Sector.ToBlockIdx(x, y, z);
-                                    if (!BrickBitmask.GetBit(brick.OccupiedMask, voxelIndex))
-                                    {
-                                        continue;
-                                    }
+                                while (row != 0UL)
+                                {
+                                    int rowBit = math.tzcnt(row);
+                                    row &= row - 1UL;
+
+                                    int x = rowBit - (y << 3);
+                                    int voxelIndex = (z << 6) | rowBit;
                                     counters.OccupiedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
@@ -616,7 +644,7 @@ namespace Unity.Physics
             float reach,
             float maxDistance,
             BrickCacheEntry* cache,
-            ref VoxelContactCounters counters,
+            ref VoxelContactQueryCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             float3 sourceMinimum = math.min(sourceOriginInB, sourceOriginInB + sourceEdgeInB);
@@ -643,20 +671,48 @@ namespace Unity.Physics
                         int3 brickOrigin = brickCoord * Sector.SIZE_IN_BLOCKS;
                         int3 localLower = math.max(lower - brickOrigin, int3.zero);
                         int3 localUpper = math.min(upper - brickOrigin, new int3(Sector.BRICK_MASK));
+                        if (math.any(localLower > localUpper))
+                        {
+                            continue;
+                        }
+
+                        // The occupancy mask is one ulong per z slice with bit x + 8y, so a whole
+                        // voxel row of the window is a contiguous bit field and a whole slice is one
+                        // word. Testing those rejects empty space a row or a slice at a time, and
+                        // iterating the surviving bits touches only occupied voxels - the sweep is
+                        // overwhelmingly empty, so per-voxel probing spends nearly all of its work
+                        // on voxels that are not there.
+                        int3 localSize = localUpper - localLower + 1;
+                        ulong rowSelect = ((1UL << localSize.x) - 1UL) << localLower.x;
+                        counters.WindowRoots += localSize.x * localSize.y * localSize.z;
 
                         for (int z = localLower.z; z <= localUpper.z; z++)
                         {
+                            ulong slice = brick.OccupiedMask[z];
+                            if (slice == 0UL)
+                            {
+                                counters.RowsTested += localSize.y;
+                                counters.RowsSkipped += localSize.y;
+                                continue;
+                            }
+
                             for (int y = localLower.y; y <= localUpper.y; y++)
                             {
-                                for (int x = localLower.x; x <= localUpper.x; x++)
+                                counters.RowsTested++;
+                                ulong row = slice & (rowSelect << (y << 3));
+                                if (row == 0UL)
                                 {
-                                    counters.WindowRoots++;
+                                    counters.RowsSkipped++;
+                                    continue;
+                                }
 
-                                    int voxelIndex = Sector.ToBlockIdx(x, y, z);
-                                    if (!BrickBitmask.GetBit(brick.OccupiedMask, voxelIndex))
-                                    {
-                                        continue;
-                                    }
+                                while (row != 0UL)
+                                {
+                                    int rowBit = math.tzcnt(row);
+                                    row &= row - 1UL;
+
+                                    int x = rowBit - (y << 3);
+                                    int voxelIndex = (z << 6) | rowBit;
                                     counters.OccupiedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
@@ -737,11 +793,11 @@ namespace Unity.Physics
                     ? Mul(aFromB, sourceCenter)
                     : Mul(bFromA, sourceCenter);
 
-                counters.VertexSources++;
+                counters.Vertex.Sources++;
                 VertexQuery(
                     sourceCoord, sourceInfo, target, sourcePointInTarget,
                     bFromA, reach, maxDistance, isSourceFromB, cache,
-                    ref counters, ref contacts);
+                    ref counters.Vertex, ref contacts);
             }
 
             if (isSourceFromB)
@@ -768,10 +824,10 @@ namespace Unity.Physics
                     : (axisMask & 2) != 0 ? bFromA.Rotation.c1
                     : bFromA.Rotation.c2;
 
-                counters.EdgeSources++;
+                counters.Edge.Sources++;
                 EdgeEdgeQuery(
                     sourceCoord, originInB, edgeInB, voxelB,
-                    reach, maxDistance, cache, ref counters, ref contacts);
+                    reach, maxDistance, cache, ref counters.Edge, ref contacts);
             }
         }
 

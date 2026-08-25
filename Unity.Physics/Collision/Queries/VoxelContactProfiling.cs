@@ -1,47 +1,52 @@
+using System.Runtime.InteropServices;
 using System.Threading;
 using Unity.Burst;
+using Unity.Collections.LowLevel.Unsafe;
 
 namespace Unity.Physics
 {
     /// <summary>
-    /// Funnel counters for one narrowphase tick of voxel-vs-voxel contact generation.
+    /// Funnel counters for one contact query, i.e. one of the two ways generation finds targets.
     /// </summary>
     /// <remarks>
-    /// Generation narrows in stages: body pairs give source features, each source feature sweeps a
-    /// window of target roots, surviving roots give cells, and cells give contacts. Each field
-    /// counts one stage, so the ratios between them say where the work goes and whether a stage is
-    /// worth optimising. The two that decide whether the target loop should be restructured are
-    /// WindowRoots / ContactsEmitted (how much of the window is wasted) and
-    /// BrickCacheHits / BrickLookups (whether sector hash lookups still dominate).
+    /// The two queries load very differently by scene: large bodies resting on ground are rim-heavy
+    /// and run mostly edge sources, while machinery made of cogs and chains is corner-heavy and runs
+    /// mostly vertex sources. A blended total hides which one a change actually moved, so each query
+    /// carries its own copy.
     ///
-    /// Instances are accumulated on the stack inside one body pair and flushed once, so the hot
-    /// loops never touch shared memory. Without VOXELIS_CONTACT_PROFILING nothing reads them and
-    /// the increments are dead stores that Burst removes.
+    /// Stages narrow in order: sources sweep window roots, occupied roots survive the occupancy
+    /// mask, active roots carry a usable cell, cells become distance tests, tests become contacts.
     /// </remarks>
-    public struct VoxelContactCounters
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VoxelContactQueryCounters
     {
-        /// <summary>Voxel-vs-voxel body pairs that reached contact generation.</summary>
-        public long BodyPairs;
+        /// <summary>Source features that ran this query.</summary>
+        public long Sources;
 
-        /// <summary>Source voxels that ran a vertex query.</summary>
-        public long VertexSources;
-
-        /// <summary>Source segments that ran an edge-edge query.</summary>
-        public long EdgeSources;
-
-        /// <summary>Target roots visited inside a query window, before any test.</summary>
+        /// <summary>Target roots covered by a query window inside a resolved brick.</summary>
+        /// <remarks>
+        /// Counted arithmetically from the window extent, not by iterating, so it still measures the
+        /// sweep the query is responsible for after the occupancy mask stopped it from touching
+        /// empty voxels. WindowRoots against OccupiedRoots is therefore the work avoided.
+        /// </remarks>
         public long WindowRoots;
 
-        /// <summary>Window roots that passed the occupancy bit.</summary>
+        /// <summary>Window roots that are actually occupied. These are the only ones touched.</summary>
         public long OccupiedRoots;
 
-        /// <summary>Occupied roots that carried at least one usable cell.</summary>
+        /// <summary>Occupied roots carrying at least one cell usable by this query.</summary>
         public long ActiveRoots;
 
         /// <summary>Closed-form distance evaluations, i.e. candidate feature pairs.</summary>
         public long CellTests;
 
-        /// <summary>Brick resolution requests made by the queries.</summary>
+        /// <summary>Single-word occupancy tests, one per voxel row of a window.</summary>
+        public long RowsTested;
+
+        /// <summary>Rows a single word test rejected whole, skipping every voxel in them.</summary>
+        public long RowsSkipped;
+
+        /// <summary>Brick resolution requests.</summary>
         public long BrickLookups;
 
         /// <summary>Requests answered from the brick cache without a sector hash lookup.</summary>
@@ -53,27 +58,66 @@ namespace Unity.Physics
         /// <summary>Cell tests dropped because the pair was further apart than maxDistance.</summary>
         public long ContactsOutOfRange;
 
-        /// <summary>Contacts dropped because their witness shared a carrier and normal with one already reported.</summary>
+        /// <summary>Contacts dropped for sharing a carrier and normal with one already reported.</summary>
         public long ContactsDeduped;
 
-        /// <summary>Cell tests dropped because the two cores coincided, leaving the normal undefined.</summary>
+        /// <summary>Cell tests dropped because the cores coincided, leaving the normal undefined.</summary>
         public long ContactsDegenerate;
 
-        public void Add(in VoxelContactCounters other)
+        public void Add(in VoxelContactQueryCounters other)
         {
-            BodyPairs += other.BodyPairs;
-            VertexSources += other.VertexSources;
-            EdgeSources += other.EdgeSources;
+            Sources += other.Sources;
             WindowRoots += other.WindowRoots;
             OccupiedRoots += other.OccupiedRoots;
             ActiveRoots += other.ActiveRoots;
             CellTests += other.CellTests;
+            RowsTested += other.RowsTested;
+            RowsSkipped += other.RowsSkipped;
             BrickLookups += other.BrickLookups;
             BrickCacheHits += other.BrickCacheHits;
             ContactsEmitted += other.ContactsEmitted;
             ContactsOutOfRange += other.ContactsOutOfRange;
             ContactsDeduped += other.ContactsDeduped;
             ContactsDegenerate += other.ContactsDegenerate;
+        }
+    }
+
+    /// <summary>
+    /// Funnel counters for one narrowphase tick of voxel-vs-voxel contact generation.
+    /// </summary>
+    /// <remarks>
+    /// Accumulated on the stack inside one body pair and flushed once, so the hot loops never touch
+    /// shared memory. Without VOXELIS_CONTACT_PROFILING nothing reads them and the increments are
+    /// dead stores that Burst removes.
+    /// </remarks>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct VoxelContactCounters
+    {
+        /// <summary>Voxel-vs-voxel body pairs that reached contact generation.</summary>
+        public long BodyPairs;
+
+        /// <summary>The vertex query: source is an active vertex, targets are all active cells.</summary>
+        public VoxelContactQueryCounters Vertex;
+
+        /// <summary>The edge-edge query: source is an active edge, targets are active edges.</summary>
+        public VoxelContactQueryCounters Edge;
+
+        /// <summary>Both queries summed, for the scene-level view.</summary>
+        public VoxelContactQueryCounters Total
+        {
+            get
+            {
+                VoxelContactQueryCounters total = Vertex;
+                total.Add(Edge);
+                return total;
+            }
+        }
+
+        public void Add(in VoxelContactCounters other)
+        {
+            BodyPairs += other.BodyPairs;
+            Vertex.Add(other.Vertex);
+            Edge.Add(other.Edge);
         }
     }
 
@@ -89,21 +133,43 @@ namespace Unity.Physics
     /// Narrowphase runs in parallel over body pairs, so the flush is one interlocked add per field
     /// per pair. Call <see cref="Reset"/> before scheduling a step and <see cref="Snapshot"/> after
     /// its jobs complete.
+    ///
+    /// Counters are held in a fixed-size slot buffer rather than in the counter struct itself,
+    /// because Burst's shared-static registry is native and outlives domain reloads: a payload that
+    /// changes size throws on every access until the Editor process restarts.
     /// </remarks>
-    public static class VoxelContactProfiler
+    public static unsafe class VoxelContactProfiler
     {
 #if VOXELIS_CONTACT_PROFILING
+        // Burst registers a SharedStatic in a NATIVE registry keyed by type, and that registry
+        // survives domain reloads - only a process restart clears it. If the payload's size ever
+        // changes, every access throws until the Editor is restarted. So the payload is a fixed
+        // slot buffer whose size never moves, and the counters are copied through it as a flat run
+        // of longs. Adding a counter above stays a recompile, not a restart.
+        private const int k_SlotCount = 64;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CounterSlots
+        {
+            public fixed long Values[k_SlotCount];
+        }
+
         // SharedStatic keys itself on type arguments, and a static class cannot be one, so the
         // owning context is a private placeholder rather than VoxelContactProfiler itself.
         private class ProfilerContext { }
         private class CountersKey { }
         private class EnabledKey { }
 
-        private static readonly SharedStatic<VoxelContactCounters> s_Counters =
-            SharedStatic<VoxelContactCounters>.GetOrCreate<ProfilerContext, CountersKey>();
+        private static readonly SharedStatic<CounterSlots> s_Slots =
+            SharedStatic<CounterSlots>.GetOrCreate<ProfilerContext, CountersKey>();
 
         private static readonly SharedStatic<int> s_Enabled =
             SharedStatic<int>.GetOrCreate<ProfilerContext, EnabledKey>();
+
+        private static long* SlotPtr => (long*)UnsafeUtility.AddressOf(ref s_Slots.Data);
+
+        /// <summary>Longs in <see cref="VoxelContactCounters"/>, which is a flat run of them.</summary>
+        private static int SlotsUsed => UnsafeUtility.SizeOf<VoxelContactCounters>() / sizeof(long);
 #endif
 
         /// <summary>
@@ -137,7 +203,20 @@ namespace Unity.Physics
         public static void Reset()
         {
 #if VOXELIS_CONTACT_PROFILING
-            s_Counters.Data = default;
+            // Main thread only, so this is where an oversized counter struct is caught: the flush
+            // runs inside Burst jobs and cannot report anything.
+            if (SlotsUsed > k_SlotCount)
+            {
+                throw new System.InvalidOperationException(
+                    "VoxelContactCounters needs " + SlotsUsed + " slots but only "
+                    + k_SlotCount + " exist. Raise k_SlotCount.");
+            }
+
+            long* slots = SlotPtr;
+            for (int i = 0; i < k_SlotCount; i++)
+            {
+                slots[i] = 0L;
+            }
 #endif
         }
 
@@ -145,7 +224,15 @@ namespace Unity.Physics
         public static VoxelContactCounters Snapshot()
         {
 #if VOXELIS_CONTACT_PROFILING
-            return s_Counters.Data;
+            VoxelContactCounters result = default;
+            long* destination = (long*)UnsafeUtility.AddressOf(ref result);
+            long* slots = SlotPtr;
+            int used = SlotsUsed;
+            for (int i = 0; i < used && i < k_SlotCount; i++)
+            {
+                destination[i] = slots[i];
+            }
+            return result;
 #else
             return default;
 #endif
@@ -163,20 +250,16 @@ namespace Unity.Physics
                 return;
             }
 
-            ref VoxelContactCounters total = ref s_Counters.Data;
-            Interlocked.Add(ref total.BodyPairs, local.BodyPairs);
-            Interlocked.Add(ref total.VertexSources, local.VertexSources);
-            Interlocked.Add(ref total.EdgeSources, local.EdgeSources);
-            Interlocked.Add(ref total.WindowRoots, local.WindowRoots);
-            Interlocked.Add(ref total.OccupiedRoots, local.OccupiedRoots);
-            Interlocked.Add(ref total.ActiveRoots, local.ActiveRoots);
-            Interlocked.Add(ref total.CellTests, local.CellTests);
-            Interlocked.Add(ref total.BrickLookups, local.BrickLookups);
-            Interlocked.Add(ref total.BrickCacheHits, local.BrickCacheHits);
-            Interlocked.Add(ref total.ContactsEmitted, local.ContactsEmitted);
-            Interlocked.Add(ref total.ContactsOutOfRange, local.ContactsOutOfRange);
-            Interlocked.Add(ref total.ContactsDeduped, local.ContactsDeduped);
-            Interlocked.Add(ref total.ContactsDegenerate, local.ContactsDegenerate);
+            // Every field is a long, so the whole struct folds in with one loop. That keeps the
+            // flush correct when counters are added or reordered, with no per-field list to update.
+            VoxelContactCounters source = local;
+            long* values = (long*)UnsafeUtility.AddressOf(ref source);
+            long* slots = SlotPtr;
+            int used = SlotsUsed;
+            for (int i = 0; i < used && i < k_SlotCount; i++)
+            {
+                Interlocked.Add(ref slots[i], values[i]);
+            }
 #endif
         }
     }
