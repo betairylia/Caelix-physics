@@ -113,6 +113,29 @@ namespace Unity.Physics
 
         const int k_BrickCacheSize = 8;
 
+        // Target bricks one source brick can reach, per axis. A source brick is 8 blocks, so under
+        // rotation its centre cloud has a half extent of at most 3.5*sqrt(3) blocks, and the cull
+        // window adds 2 + sqrt(3) + margin more - a span comfortably under five bricks per axis.
+        // TryGetTargetBrick falls back to the cache if a lookup ever lands outside anyway, so this
+        // bound is a size hint, not a correctness assumption.
+        const int k_MaxTargetBrickSpan = 5;
+        const int k_MaxTargetBricks =
+            k_MaxTargetBrickSpan * k_MaxTargetBrickSpan * k_MaxTargetBrickSpan;
+
+        // Target bricks resolved once for a whole source brick.
+        //
+        // Every key of a source brick sweeps a window a few voxels wide, so each one used to repeat
+        // a sector hash lookup for each brick it straddled - two to four per key, to then read a
+        // handful of voxels. The reachable target bricks are the same for every key in the brick,
+        // and the cull already computes that range, so they are resolved once and indexed by
+        // coordinate afterwards.
+        struct TargetBrickWindow
+        {
+            public int3 Lo;
+            public int3 Size;
+            public bool Valid;
+        }
+
         internal static unsafe void VoxelVoxel(
             Context context,
             Collider* colliderA,
@@ -463,6 +486,78 @@ namespace Unity.Physics
             return present;
         }
 
+        // Resolves every target brick a source brick can reach. `views` must hold at least
+        // k_MaxTargetBricks entries; the window reports itself invalid when the range does not fit,
+        // and callers then fall through to the per-lookup cache.
+        private static unsafe TargetBrickWindow BuildTargetBrickWindow(
+            VoxelCollider* target,
+            int3 brickLo,
+            int3 brickHi,
+            BrickCacheEntry* views,
+            ref VoxelContactCounters counters)
+        {
+            int3 size = brickHi - brickLo + 1;
+            if (math.any(size <= 0) || math.any(size > k_MaxTargetBrickSpan))
+            {
+                counters.SourceBricksUnwindowed++;
+                return default;
+            }
+
+            counters.SourceBricks++;
+
+            int index = 0;
+            for (int z = 0; z < size.z; z++)
+            {
+                for (int y = 0; y < size.y; y++)
+                {
+                    for (int x = 0; x < size.x; x++)
+                    {
+                        int3 coord = brickLo + new int3(x, y, z);
+                        counters.GatherResolves++;
+                        bool present = ResolveVoxelBrick(target, coord, out VoxelBrickView view);
+                        views[index++] = new BrickCacheEntry
+                        {
+                            Coord = coord,
+                            View = view,
+                            Valid = true,
+                            Present = present
+                        };
+                    }
+                }
+            }
+
+            return new TargetBrickWindow { Lo = brickLo, Size = size, Valid = true };
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static unsafe bool TryGetTargetBrick(
+            VoxelCollider* target,
+            int3 globalBrickCoord,
+            in TargetBrickWindow window,
+            BrickCacheEntry* views,
+            BrickCacheEntry* cache,
+            ref VoxelContactQueryCounters counters,
+            out VoxelBrickView view)
+        {
+            if (window.Valid)
+            {
+                int3 offset = globalBrickCoord - window.Lo;
+                if (math.all(offset >= 0) && math.all(offset < window.Size))
+                {
+                    counters.BrickLookups++;
+                    counters.BrickCacheHits++;
+                    BrickCacheEntry entry = views[
+                        offset.x + window.Size.x * (offset.y + window.Size.y * offset.z)];
+                    view = entry.View;
+                    return entry.Present;
+                }
+
+                counters.BrickWindowMisses++;
+            }
+
+            return TryGetVoxelBrickCached(target, globalBrickCoord, cache, ref counters, out view);
+        }
+
         // -----------------------------------------------------------------------------------
         // Vertex query: source vertex against every active target cell
         // -----------------------------------------------------------------------------------
@@ -478,6 +573,8 @@ namespace Unity.Physics
             float reach,
             float maxDistance,
             bool isSourceFromB,
+            in TargetBrickWindow window,
+            BrickCacheEntry* views,
             BrickCacheEntry* cache,
             ref VoxelContactQueryCounters counters,
             ref UnsafeList<VoxelContact> contacts)
@@ -507,8 +604,9 @@ namespace Unity.Physics
                     for (int brickX = lowerBrick.x; brickX <= upperBrick.x; brickX++)
                     {
                         int3 brickCoord = new int3(brickX, brickY, brickZ);
-                        if (!TryGetVoxelBrickCached(
-                                target, brickCoord, cache, ref counters, out VoxelBrickView brick))
+                        if (!TryGetTargetBrick(
+                                target, brickCoord, in window, views, cache, ref counters,
+                                out VoxelBrickView brick))
                         {
                             continue;
                         }
@@ -646,6 +744,8 @@ namespace Unity.Physics
             VoxelCollider* voxelB,
             float reach,
             float maxDistance,
+            in TargetBrickWindow window,
+            BrickCacheEntry* views,
             BrickCacheEntry* cache,
             ref VoxelContactQueryCounters counters,
             ref UnsafeList<VoxelContact> contacts)
@@ -665,8 +765,9 @@ namespace Unity.Physics
                     for (int brickX = lowerBrick.x; brickX <= upperBrick.x; brickX++)
                     {
                         int3 brickCoord = new int3(brickX, brickY, brickZ);
-                        if (!TryGetVoxelBrickCached(
-                                voxelB, brickCoord, cache, ref counters, out VoxelBrickView brick))
+                        if (!TryGetTargetBrick(
+                                voxelB, brickCoord, in window, views, cache, ref counters,
+                                out VoxelBrickView brick))
                         {
                             continue;
                         }
@@ -787,6 +888,8 @@ namespace Unity.Physics
             float reach,
             float maxDistance,
             bool isSourceFromB,
+            in TargetBrickWindow window,
+            BrickCacheEntry* views,
             BrickCacheEntry* cache,
             ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
@@ -803,7 +906,7 @@ namespace Unity.Physics
                 counters.Vertex.Sources++;
                 VertexQuery(
                     sourceCoord, sourceInfo, target, sourcePointInTarget,
-                    bFromA, reach, maxDistance, isSourceFromB, cache,
+                    bFromA, reach, maxDistance, isSourceFromB, in window, views, cache,
                     ref counters.Vertex, ref contacts);
             }
 
@@ -834,7 +937,7 @@ namespace Unity.Physics
                 counters.Edge.Sources++;
                 EdgeEdgeQuery(
                     sourceCoord, originInB, edgeInB, voxelB,
-                    reach, maxDistance, cache, ref counters.Edge, ref contacts);
+                    reach, maxDistance, in window, views, cache, ref counters.Edge, ref contacts);
             }
         }
 
@@ -890,6 +993,10 @@ namespace Unity.Physics
                 cacheB[i] = default;
             }
 
+            // Rebuilt per source brick and shared by every key in it. The two passes run in
+            // sequence, so one buffer serves both even though they gather different bodies.
+            BrickCacheEntry* windowViews = stackalloc BrickCacheEntry[k_MaxTargetBricks];
+
             var keysA = sectorsA.GetKeyArray(Allocator.Temp);
             for (int iSectorA = 0; iSectorA < keysA.Length; iSectorA++)
             {
@@ -913,11 +1020,14 @@ namespace Unity.Physics
                     // B-side pass must reach. Only the key enumeration below is gated on it.
                     bool overlapsB = MarkOverlappedBricksInB(
                         brickOriginBlocks, voxelB, bFromA, rowAbsSum, cullingWindowHalfWidth,
-                        ref overlappedBricksB);
+                        ref overlappedBricksB, out int3 targetBrickLo, out int3 targetBrickHi);
                     if (!overlapsB)
                     {
                         continue;
                     }
+
+                    TargetBrickWindow window = BuildTargetBrickWindow(
+                        voxelB, targetBrickLo, targetBrickHi, windowViews, ref counters);
 
                     foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
                         sectorA.Ptr->EnumeratePhysicsKeyBlocksInBrick(brickRef.Bid, brickOriginBlocks))
@@ -925,7 +1035,8 @@ namespace Unity.Physics
                         HandleSourceBlock(
                             blockIter.position, blockIter.value, voxelA, voxelB,
                             bFromA, aFromB, reach, maxDistance,
-                            isSourceFromB: false, cacheB, ref counters, ref contacts);
+                            isSourceFromB: false, in window, windowViews, cacheB,
+                            ref counters, ref contacts);
                     }
                 }
             }
@@ -936,6 +1047,12 @@ namespace Unity.Physics
             {
                 cacheA[i] = default;
             }
+
+            // The B-side pass reaches into A, so its brick range is taken through the inverse
+            // transform and the inverse rotation's own per-axis extent.
+            float3x3 inverseRotation = aFromB.Rotation;
+            float3 inverseRowAbsSum = math.abs(inverseRotation.c0)
+                + math.abs(inverseRotation.c1) + math.abs(inverseRotation.c2);
 
             foreach (int3 brickCoordB in overlappedBricksB)
             {
@@ -948,13 +1065,21 @@ namespace Unity.Physics
                     Sector.ToBrickIdx(brickPosInSector.x, brickPosInSector.y, brickPosInSector.z)];
 
                 int3 brickOriginBlocks = brickCoordB * Sector.SIZE_IN_BLOCKS;
+
+                GetOverlappingBrickRange(
+                    brickOriginBlocks, aFromB, inverseRowAbsSum, cullingWindowHalfWidth,
+                    out int3 sourceBrickLo, out int3 sourceBrickHi);
+                TargetBrickWindow window = BuildTargetBrickWindow(
+                    voxelA, sourceBrickLo, sourceBrickHi, windowViews, ref counters);
+
                 foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
                     sectorB.Ptr->EnumeratePhysicsKeyBlocksInBrick(bid, brickOriginBlocks))
                 {
                     HandleSourceBlock(
                         blockIter.position, blockIter.value, voxelA, voxelB,
                         bFromA, aFromB, reach, maxDistance,
-                        isSourceFromB: true, cacheA, ref counters, ref contacts);
+                        isSourceFromB: true, in window, windowViews, cacheA,
+                        ref counters, ref contacts);
                 }
             }
             overlappedBricksB.Dispose();
@@ -1015,11 +1140,13 @@ namespace Unity.Physics
             in MTransform bFromA,
             float3 rowAbsSum,
             float cullingWindowHalfWidth,
-            ref UnsafeHashSet<int3> overlapped)
+            ref UnsafeHashSet<int3> overlapped,
+            out int3 brickLo,
+            out int3 brickHi)
         {
             GetOverlappingBrickRange(
                 brickOriginBlocksA, bFromA, rowAbsSum, cullingWindowHalfWidth,
-                out int3 brickLo, out int3 brickHi);
+                out brickLo, out brickHi);
 
             bool any = false;
 

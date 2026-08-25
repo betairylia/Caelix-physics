@@ -57,6 +57,13 @@ namespace Unity.Physics
         /// <summary>Brick resolution requests.</summary>
         public long BrickLookups;
 
+        /// <summary>
+        /// Requests for a brick outside the source brick's gathered target window, which fall back
+        /// to a sector hash lookup. Expected to be zero: the gather range comes from the same
+        /// conservative bound the brick cull uses, so a nonzero count means that bound is wrong.
+        /// </summary>
+        public long BrickWindowMisses;
+
         /// <summary>Requests answered from the brick cache without a sector hash lookup.</summary>
         public long BrickCacheHits;
 
@@ -82,6 +89,7 @@ namespace Unity.Physics
             RowsTested += other.RowsTested;
             RowsSkipped += other.RowsSkipped;
             BrickLookups += other.BrickLookups;
+            BrickWindowMisses += other.BrickWindowMisses;
             BrickCacheHits += other.BrickCacheHits;
             ContactsEmitted += other.ContactsEmitted;
             ContactsOutOfRange += other.ContactsOutOfRange;
@@ -104,6 +112,18 @@ namespace Unity.Physics
         /// <summary>Voxel-vs-voxel body pairs that reached contact generation.</summary>
         public long BodyPairs;
 
+        /// <summary>Source bricks that gathered their target bricks once up front.</summary>
+        public long SourceBricks;
+
+        /// <summary>
+        /// Source bricks whose target range was too wide for the gather array, so every key in them
+        /// resolved bricks the old way.
+        /// </summary>
+        public long SourceBricksUnwindowed;
+
+        /// <summary>Brick resolutions performed by the gathers.</summary>
+        public long GatherResolves;
+
         /// <summary>The vertex query: source is an active vertex, targets are all active cells.</summary>
         public VoxelContactQueryCounters Vertex;
 
@@ -124,6 +144,9 @@ namespace Unity.Physics
         public void Add(in VoxelContactCounters other)
         {
             BodyPairs += other.BodyPairs;
+            SourceBricks += other.SourceBricks;
+            SourceBricksUnwindowed += other.SourceBricksUnwindowed;
+            GatherResolves += other.GatherResolves;
             Vertex.Add(other.Vertex);
             Edge.Add(other.Edge);
         }
