@@ -602,7 +602,10 @@ namespace Unity.Physics
                                         if (isSourceFromB)
                                         {
                                             corePointAinB = Mul(bFromA, witness);
-                                            corePointBinB = sourcePointInTarget;
+                                            // sourcePointInTarget is in A space in this branch. Emission
+                                            // requires both witnesses in B space, where the B source point
+                                            // is its unchanged voxel center.
+                                            corePointBinB = (float3)sourceCoord + 0.5f;
                                         }
                                         else
                                         {
