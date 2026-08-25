@@ -58,11 +58,18 @@ namespace Unity.Physics
         public long BrickLookups;
 
         /// <summary>
-        /// Requests for a brick outside the source brick's gathered target window, which fall back
-        /// to a sector hash lookup. Expected to be zero: the gather range comes from the same
+        /// Requests for a brick outside the source brick's target window, which fall back to a
+        /// sector hash lookup. Expected to be zero: the window range comes from the same
         /// conservative bound the brick cull uses, so a nonzero count means that bound is wrong.
         /// </summary>
         public long BrickWindowMisses;
+
+        /// <summary>
+        /// Sector lookups actually performed, i.e. the requests the window memo could not answer.
+        /// This is the cost brick resolution really carries; BrickLookups counts requests, most of
+        /// which are answered from the memo for free.
+        /// </summary>
+        public long BrickResolves;
 
         /// <summary>Requests answered from the brick cache without a sector hash lookup.</summary>
         public long BrickCacheHits;
@@ -90,6 +97,7 @@ namespace Unity.Physics
             RowsSkipped += other.RowsSkipped;
             BrickLookups += other.BrickLookups;
             BrickWindowMisses += other.BrickWindowMisses;
+            BrickResolves += other.BrickResolves;
             BrickCacheHits += other.BrickCacheHits;
             ContactsEmitted += other.ContactsEmitted;
             ContactsOutOfRange += other.ContactsOutOfRange;
@@ -112,17 +120,14 @@ namespace Unity.Physics
         /// <summary>Voxel-vs-voxel body pairs that reached contact generation.</summary>
         public long BodyPairs;
 
-        /// <summary>Source bricks that gathered their target bricks once up front.</summary>
+        /// <summary>Source bricks that opened a target brick memo.</summary>
         public long SourceBricks;
 
         /// <summary>
-        /// Source bricks whose target range was too wide for the gather array, so every key in them
-        /// resolved bricks the old way.
+        /// Source bricks whose window range was too wide for the memo array, so every key in them
+        /// resolved bricks through the fallback cache instead.
         /// </summary>
-        public long SourceBricksUnwindowed;
-
-        /// <summary>Brick resolutions performed by the gathers.</summary>
-        public long GatherResolves;
+        public long SourceBricksTooWide;
 
         /// <summary>The vertex query: source is an active vertex, targets are all active cells.</summary>
         public VoxelContactQueryCounters Vertex;
@@ -145,8 +150,7 @@ namespace Unity.Physics
         {
             BodyPairs += other.BodyPairs;
             SourceBricks += other.SourceBricks;
-            SourceBricksUnwindowed += other.SourceBricksUnwindowed;
-            GatherResolves += other.GatherResolves;
+            SourceBricksTooWide += other.SourceBricksTooWide;
             Vertex.Add(other.Vertex);
             Edge.Add(other.Edge);
         }

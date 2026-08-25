@@ -122,13 +122,18 @@ namespace Unity.Physics
         const int k_MaxTargetBricks =
             k_MaxTargetBrickSpan * k_MaxTargetBrickSpan * k_MaxTargetBrickSpan;
 
-        // Target bricks resolved once for a whole source brick.
+        // Memo of target bricks for one source brick, indexed by position within the reachable
+        // range rather than hashed.
         //
-        // Every key of a source brick sweeps a window a few voxels wide, so each one used to repeat
-        // a sector hash lookup for each brick it straddled - two to four per key, to then read a
-        // handful of voxels. The reachable target bricks are the same for every key in the brick,
-        // and the cull already computes that range, so they are resolved once and indexed by
-        // coordinate afterwards.
+        // Every key of a source brick sweeps a window a few voxels wide and would otherwise repeat
+        // a sector hash lookup for each brick it straddles. The reachable range is the same for
+        // every key in the brick, so it addresses a memo directly and each distinct brick is
+        // resolved at most once per source brick.
+        //
+        // Entries fill on first touch. Resolving the whole range up front costs far more than it
+        // saves: the range is a conservative box around the entire brick, while its keys lie on a
+        // thin surface shell and between them reach only a fraction of it. Measured in game scenes,
+        // eager filling resolved 29.4 bricks per source brick to serve about 12 distinct ones.
         struct TargetBrickWindow
         {
             public int3 Lo;
@@ -475,6 +480,7 @@ namespace Unity.Physics
                 return entry.Present;
             }
 
+            counters.BrickResolves++;
             bool present = ResolveVoxelBrick(collider, globalBrickCoord, out view);
             cache[slot] = new BrickCacheEntry
             {
@@ -486,46 +492,22 @@ namespace Unity.Physics
             return present;
         }
 
-        // Resolves every target brick a source brick can reach. `views` must hold at least
-        // k_MaxTargetBricks entries; the window reports itself invalid when the range does not fit,
-        // and callers then fall through to the per-lookup cache.
-        private static unsafe TargetBrickWindow BuildTargetBrickWindow(
-            VoxelCollider* target,
+        // Opens a memo over the target bricks a source brick can reach. The window reports itself
+        // invalid when the range does not fit k_MaxTargetBricks, and callers then fall through to
+        // the per-lookup cache.
+        private static TargetBrickWindow BeginTargetBrickWindow(
             int3 brickLo,
             int3 brickHi,
-            BrickCacheEntry* views,
             ref VoxelContactCounters counters)
         {
             int3 size = brickHi - brickLo + 1;
             if (math.any(size <= 0) || math.any(size > k_MaxTargetBrickSpan))
             {
-                counters.SourceBricksUnwindowed++;
+                counters.SourceBricksTooWide++;
                 return default;
             }
 
             counters.SourceBricks++;
-
-            int index = 0;
-            for (int z = 0; z < size.z; z++)
-            {
-                for (int y = 0; y < size.y; y++)
-                {
-                    for (int x = 0; x < size.x; x++)
-                    {
-                        int3 coord = brickLo + new int3(x, y, z);
-                        counters.GatherResolves++;
-                        bool present = ResolveVoxelBrick(target, coord, out VoxelBrickView view);
-                        views[index++] = new BrickCacheEntry
-                        {
-                            Coord = coord,
-                            View = view,
-                            Valid = true,
-                            Present = present
-                        };
-                    }
-                }
-            }
-
             return new TargetBrickWindow { Lo = brickLo, Size = size, Valid = true };
         }
 
@@ -545,11 +527,30 @@ namespace Unity.Physics
                 if (math.all(offset >= 0) && math.all(offset < window.Size))
                 {
                     counters.BrickLookups++;
-                    counters.BrickCacheHits++;
-                    BrickCacheEntry entry = views[
-                        offset.x + window.Size.x * (offset.y + window.Size.y * offset.z)];
-                    view = entry.View;
-                    return entry.Present;
+
+                    int index = offset.x + window.Size.x * (offset.y + window.Size.y * offset.z);
+                    BrickCacheEntry entry = views[index];
+
+                    // A stale entry left by the previous source brick sits at some index of the new
+                    // window too, so the coordinate is checked rather than cleared per brick. A
+                    // coincidental match is a genuine hit: same brick, same body, same view.
+                    if (entry.Valid && math.all(entry.Coord == globalBrickCoord))
+                    {
+                        counters.BrickCacheHits++;
+                        view = entry.View;
+                        return entry.Present;
+                    }
+
+                    counters.BrickResolves++;
+                    bool present = ResolveVoxelBrick(target, globalBrickCoord, out view);
+                    views[index] = new BrickCacheEntry
+                    {
+                        Coord = globalBrickCoord,
+                        View = view,
+                        Valid = true,
+                        Present = present
+                    };
+                    return present;
                 }
 
                 counters.BrickWindowMisses++;
@@ -993,9 +994,15 @@ namespace Unity.Physics
                 cacheB[i] = default;
             }
 
-            // Rebuilt per source brick and shared by every key in it. The two passes run in
-            // sequence, so one buffer serves both even though they gather different bodies.
+            // Re-addressed per source brick and shared by every key in it. Entries are validated
+            // by coordinate rather than cleared per brick, so the buffer MUST be cleared whenever
+            // the target body changes - otherwise a coordinate that matches across the two passes
+            // would hand back the other body's brick.
             BrickCacheEntry* windowViews = stackalloc BrickCacheEntry[k_MaxTargetBricks];
+            for (int i = 0; i < k_MaxTargetBricks; i++)
+            {
+                windowViews[i] = default;
+            }
 
             var keysA = sectorsA.GetKeyArray(Allocator.Temp);
             for (int iSectorA = 0; iSectorA < keysA.Length; iSectorA++)
@@ -1026,8 +1033,8 @@ namespace Unity.Physics
                         continue;
                     }
 
-                    TargetBrickWindow window = BuildTargetBrickWindow(
-                        voxelB, targetBrickLo, targetBrickHi, windowViews, ref counters);
+                    TargetBrickWindow window = BeginTargetBrickWindow(
+                        targetBrickLo, targetBrickHi, ref counters);
 
                     foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
                         sectorA.Ptr->EnumeratePhysicsKeyBlocksInBrick(brickRef.Bid, brickOriginBlocks))
@@ -1054,6 +1061,12 @@ namespace Unity.Physics
             float3 inverseRowAbsSum = math.abs(inverseRotation.c0)
                 + math.abs(inverseRotation.c1) + math.abs(inverseRotation.c2);
 
+            // The memo now addresses A instead of B, so every stale entry must go.
+            for (int i = 0; i < k_MaxTargetBricks; i++)
+            {
+                windowViews[i] = default;
+            }
+
             foreach (int3 brickCoordB in overlappedBricksB)
             {
                 int3 sectorCoordB = brickCoordB >> Sector.SHIFT_IN_BRICKS;
@@ -1069,8 +1082,8 @@ namespace Unity.Physics
                 GetOverlappingBrickRange(
                     brickOriginBlocks, aFromB, inverseRowAbsSum, cullingWindowHalfWidth,
                     out int3 sourceBrickLo, out int3 sourceBrickHi);
-                TargetBrickWindow window = BuildTargetBrickWindow(
-                    voxelA, sourceBrickLo, sourceBrickHi, windowViews, ref counters);
+                TargetBrickWindow window = BeginTargetBrickWindow(
+                    sourceBrickLo, sourceBrickHi, ref counters);
 
                 foreach (SectorBitmaskSlotIterator<PhysicsInfo> blockIter in
                     sectorB.Ptr->EnumeratePhysicsKeyBlocksInBrick(bid, brickOriginBlocks))
