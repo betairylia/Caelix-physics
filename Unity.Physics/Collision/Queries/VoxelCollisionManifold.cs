@@ -182,9 +182,16 @@ namespace Unity.Physics
             MTransform bFromA = Mul(Inverse(worldFromB), worldFromA);
 
             var contacts = new UnsafeList<VoxelContact>(256, Allocator.Temp);
-            CollectVoxelContacts(voxelA, voxelB, bFromA, maxDistance, ref contacts);
+
+            // Accumulated on the stack for this body pair and flushed once, so the per-root loops
+            // never touch shared memory. See VoxelContactProfiler.
+            var counters = new VoxelContactCounters { BodyPairs = 1 };
+
+            CollectVoxelContacts(voxelA, voxelB, bFromA, maxDistance, ref counters, ref contacts);
             WriteVoxelManifolds(contacts, context, worldFromB, materialA, materialB, flipped);
             contacts.Dispose();
+
+            VoxelContactProfiler.Flush(counters);
         }
 
         // -----------------------------------------------------------------------------------
@@ -322,12 +329,14 @@ namespace Unity.Physics
             byte targetAxisMask,
             float maxDistance,
             int recentCount,
+            ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             float3 delta = corePointAinB - corePointBinB;
             float coreDistanceSq = math.lengthsq(delta);
             if (coreDistanceSq <= k_MinCoreDistanceSq)
             {
+                counters.ContactsDegenerate++;
                 return false;
             }
 
@@ -335,6 +344,7 @@ namespace Unity.Physics
             float distance = coreDistance - 2.0f * k_VoxelCoreRadius;
             if (distance >= maxDistance || !math.isfinite(distance))
             {
+                counters.ContactsOutOfRange++;
                 return false;
             }
 
@@ -353,6 +363,7 @@ namespace Unity.Physics
                     math.all(existing.CarrierRoot == carrierRoot) &&
                     math.dot(existing.NormalInB, normalInB) > k_SameNormalDot)
                 {
+                    counters.ContactsDeduped++;
                     return false;
                 }
             }
@@ -368,6 +379,7 @@ namespace Unity.Physics
                 CarrierMask = carrierMask,
                 TargetAxisMask = targetAxisMask
             });
+            counters.ContactsEmitted++;
             return true;
         }
 
@@ -423,8 +435,11 @@ namespace Unity.Physics
             VoxelCollider* collider,
             int3 globalBrickCoord,
             BrickCacheEntry* cache,
+            ref VoxelContactCounters counters,
             out VoxelBrickView view)
         {
+            counters.BrickLookups++;
+
             int slot = (int)((uint)(globalBrickCoord.x * 73856093
                                     ^ globalBrickCoord.y * 19349663
                                     ^ globalBrickCoord.z * 83492791) & (k_BrickCacheSize - 1));
@@ -432,6 +447,7 @@ namespace Unity.Physics
             BrickCacheEntry entry = cache[slot];
             if (entry.Valid && math.all(entry.Coord == globalBrickCoord))
             {
+                counters.BrickCacheHits++;
                 view = entry.View;
                 return entry.Present;
             }
@@ -463,6 +479,7 @@ namespace Unity.Physics
             float maxDistance,
             bool isSourceFromB,
             BrickCacheEntry* cache,
+            ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             // The source point must itself be maximal for the budget each target dimension leaves.
@@ -490,7 +507,8 @@ namespace Unity.Physics
                     for (int brickX = lowerBrick.x; brickX <= upperBrick.x; brickX++)
                     {
                         int3 brickCoord = new int3(brickX, brickY, brickZ);
-                        if (!TryGetVoxelBrickCached(target, brickCoord, cache, out VoxelBrickView brick))
+                        if (!TryGetVoxelBrickCached(
+                                target, brickCoord, cache, ref counters, out VoxelBrickView brick))
                         {
                             continue;
                         }
@@ -505,11 +523,14 @@ namespace Unity.Physics
                             {
                                 for (int x = localLower.x; x <= localUpper.x; x++)
                                 {
+                                    counters.WindowRoots++;
+
                                     int voxelIndex = Sector.ToBlockIdx(x, y, z);
                                     if (!BrickBitmask.GetBit(brick.OccupiedMask, voxelIndex))
                                     {
                                         continue;
                                     }
+                                    counters.OccupiedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
 
@@ -527,6 +548,7 @@ namespace Unity.Physics
                                     {
                                         continue;
                                     }
+                                    counters.ActiveRoots++;
 
                                     int3 targetRoot = brickOrigin + new int3(x, y, z);
                                     while (allowed != 0)
@@ -540,6 +562,7 @@ namespace Unity.Physics
                                         {
                                             continue;
                                         }
+                                        counters.CellTests++;
 
                                         GetCellBox(targetRoot, axisMask,
                                             out float3 cellMinimum, out float3 cellMaximum);
@@ -564,7 +587,8 @@ namespace Unity.Physics
                                                 isSourceFromB ? targetRoot : sourceCoord,
                                                 isSourceFromB ? sourceCoord : targetRoot,
                                                 (byte)axisMask,
-                                                maxDistance, recentCount, ref contacts))
+                                                maxDistance, recentCount,
+                                                ref counters, ref contacts))
                                         {
                                             recentCount++;
                                         }
@@ -592,6 +616,7 @@ namespace Unity.Physics
             float reach,
             float maxDistance,
             BrickCacheEntry* cache,
+            ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             float3 sourceMinimum = math.min(sourceOriginInB, sourceOriginInB + sourceEdgeInB);
@@ -609,7 +634,8 @@ namespace Unity.Physics
                     for (int brickX = lowerBrick.x; brickX <= upperBrick.x; brickX++)
                     {
                         int3 brickCoord = new int3(brickX, brickY, brickZ);
-                        if (!TryGetVoxelBrickCached(voxelB, brickCoord, cache, out VoxelBrickView brick))
+                        if (!TryGetVoxelBrickCached(
+                                voxelB, brickCoord, cache, ref counters, out VoxelBrickView brick))
                         {
                             continue;
                         }
@@ -624,11 +650,14 @@ namespace Unity.Physics
                             {
                                 for (int x = localLower.x; x <= localUpper.x; x++)
                                 {
+                                    counters.WindowRoots++;
+
                                     int voxelIndex = Sector.ToBlockIdx(x, y, z);
                                     if (!BrickBitmask.GetBit(brick.OccupiedMask, voxelIndex))
                                     {
                                         continue;
                                     }
+                                    counters.OccupiedRoots++;
 
                                     PhysicsInfo targetInfo = brick.Physics[voxelIndex];
 
@@ -640,6 +669,7 @@ namespace Unity.Physics
                                     {
                                         continue;
                                     }
+                                    counters.ActiveRoots++;
 
                                     int3 targetRoot = brickOrigin + new int3(x, y, z);
                                     float3 targetOrigin = (float3)targetRoot + 0.5f;
@@ -648,6 +678,7 @@ namespace Unity.Physics
                                     {
                                         int featureBit = math.tzcnt((uint)allowed);
                                         allowed &= allowed - 1;
+                                        counters.CellTests++;
 
                                         int axisMask = PhysicsInfo.AxisMaskFromFeatureBit(featureBit);
                                         float3 targetEdge = new float3(
@@ -663,7 +694,8 @@ namespace Unity.Physics
                                         if (EmitCoreContact(
                                                 corePointAinB, corePointBinB,
                                                 sourceCoord, targetRoot, (byte)axisMask,
-                                                maxDistance, recentCount, ref contacts))
+                                                maxDistance, recentCount,
+                                                ref counters, ref contacts))
                                         {
                                             recentCount++;
                                         }
@@ -693,6 +725,7 @@ namespace Unity.Physics
             float maxDistance,
             bool isSourceFromB,
             BrickCacheEntry* cache,
+            ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             float3 sourceCenter = (float3)sourceCoord + 0.5f;
@@ -704,9 +737,11 @@ namespace Unity.Physics
                     ? Mul(aFromB, sourceCenter)
                     : Mul(bFromA, sourceCenter);
 
+                counters.VertexSources++;
                 VertexQuery(
                     sourceCoord, sourceInfo, target, sourcePointInTarget,
-                    bFromA, reach, maxDistance, isSourceFromB, cache, ref contacts);
+                    bFromA, reach, maxDistance, isSourceFromB, cache,
+                    ref counters, ref contacts);
             }
 
             if (isSourceFromB)
@@ -733,9 +768,10 @@ namespace Unity.Physics
                     : (axisMask & 2) != 0 ? bFromA.Rotation.c1
                     : bFromA.Rotation.c2;
 
+                counters.EdgeSources++;
                 EdgeEdgeQuery(
                     sourceCoord, originInB, edgeInB, voxelB,
-                    reach, maxDistance, cache, ref contacts);
+                    reach, maxDistance, cache, ref counters, ref contacts);
             }
         }
 
@@ -759,6 +795,7 @@ namespace Unity.Physics
             VoxelCollider* voxelB,
             in MTransform bFromA,
             float maxDistance,
+            ref VoxelContactCounters counters,
             ref UnsafeList<VoxelContact> contacts)
         {
             var sectorsA = voxelA->m_Sectors;
@@ -825,7 +862,7 @@ namespace Unity.Physics
                         HandleSourceBlock(
                             blockIter.position, blockIter.value, voxelA, voxelB,
                             bFromA, aFromB, reach, maxDistance,
-                            isSourceFromB: false, cacheB, ref contacts);
+                            isSourceFromB: false, cacheB, ref counters, ref contacts);
                     }
                 }
             }
@@ -854,7 +891,7 @@ namespace Unity.Physics
                     HandleSourceBlock(
                         blockIter.position, blockIter.value, voxelA, voxelB,
                         bFromA, aFromB, reach, maxDistance,
-                        isSourceFromB: true, cacheA, ref contacts);
+                        isSourceFromB: true, cacheA, ref counters, ref contacts);
                 }
             }
             overlappedBricksB.Dispose();
