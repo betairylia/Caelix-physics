@@ -368,6 +368,7 @@ namespace Unity.Physics
 
             GetWitnessCarrier(corePointBinB, out int3 carrierRoot, out byte carrierMask);
 
+            // TODO: FIXME: This looks sus?
             for (int i = contacts.Length - recentCount; i < contacts.Length; i++)
             {
                 VoxelContact existing = contacts[i];
