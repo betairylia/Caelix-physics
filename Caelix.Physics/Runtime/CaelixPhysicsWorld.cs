@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Physics;
+using Unity.Profiling;
 using UnityEngine;
-using UnityEngine.Profiling;
 using Caelix.Tick;
 using Caelix.Utils;
 
@@ -12,6 +12,25 @@ namespace Caelix.Simulation
 {
     public partial class CaelixPhysicsWorld : MonoSingleton<CaelixPhysicsWorld>
     {
+        private static readonly ProfilerMarker s_BrickOverlapRebuildBroadphaseMarker = new("Brick Overlap Rebuild Broadphase");
+        private static readonly ProfilerMarker s_BrickOverlapQueryMarker = new("Brick Overlap Query");
+        private static readonly ProfilerMarker s_BrickOverlapGraphBuildMarker = new("Brick Overlap Graph Build");
+        private static readonly ProfilerMarker s_PhysicsBuildWorldMarker = new("Physics Build World");
+        private static readonly ProfilerMarker s_PhysicsBeforeSimulationStartMarker = new("Physics BeforeSimulationStart");
+        private static readonly ProfilerMarker s_PhysicsBuildStepInputMarker = new("Physics Build Step Input");
+        private static readonly ProfilerMarker s_PhysicsDebugPreStepMarker = new("Physics Debug Pre-Step");
+        private static readonly ProfilerMarker s_PhysicsBuildBroadphaseMarker = new("Physics Build Broadphase");
+        private static readonly ProfilerMarker s_PhysicsCompleteBroadphaseMarker = new("Physics Complete Broadphase");
+        private static readonly ProfilerMarker s_PhysicsDebugPostBroadphaseMarker = new("Physics Debug Post-Broadphase");
+        private static readonly ProfilerMarker s_PhysicsResetSimulationContextMarker = new("Physics Reset Simulation Context");
+        private static readonly ProfilerMarker s_PhysicsScheduleStepJobsMarker = new("Physics Schedule Step Jobs");
+        private static readonly ProfilerMarker s_PhysicsCompleteStepJobsMarker = new("Physics Complete Step Jobs");
+        private static readonly ProfilerMarker s_PhysicsContactDebugLoggingMarker = new("Physics Contact Debug Logging");
+        private static readonly ProfilerMarker s_PhysicsOnSimulationFinishedMarker = new("Physics OnSimulationFinished");
+        private static readonly ProfilerMarker s_PhysicsExportWorldMarker = new("Physics Export World");
+        private static readonly ProfilerMarker s_PhysicsCompleteDisposeJobsMarker = new("Physics Complete Dispose Jobs");
+        private static readonly ProfilerMarker s_PhysicsResetStaticChangedFlagMarker = new("Physics Reset Static Changed Flag");
+
         private readonly Dictionary<Guid128, VoxelBody> bodies = new();
         private VoxelBodyForceCommandStream bodyForceCommands;
 
@@ -153,25 +172,29 @@ namespace Caelix.Simulation
 
             if (rebuildBroadphase)
             {
-                Profiler.BeginSample("Brick Overlap Rebuild Broadphase");
-                physicsWorld.CollisionWorld.ScheduleBuildBroadphaseJobs(
-                    ref physicsWorld, lastTimeStep, gravity, haveStaticBodiesChanged,
-                    inputDeps, multiThreaded).Complete();
-                inputDeps = default;
-                Profiler.EndSample();
+                using (s_BrickOverlapRebuildBroadphaseMarker.Auto())
+                {
+                    physicsWorld.CollisionWorld.ScheduleBuildBroadphaseJobs(
+                        ref physicsWorld, lastTimeStep, gravity, haveStaticBodiesChanged,
+                        inputDeps, multiThreaded).Complete();
+                    inputDeps = default;
+                }
             }
 
-            Profiler.BeginSample("Brick Overlap Query");
-            JobHandle queryHandle = physicsWorld.CollisionWorld.ScheduleVoxelBrickOverlaps(
-                queryBatches, queryBricksByBatch, out NativeStream rawOverlaps, inputDeps);
-            queryHandle.Complete();
-            Profiler.EndSample();
+            NativeStream rawOverlaps;
+            using (s_BrickOverlapQueryMarker.Auto())
+            {
+                JobHandle queryHandle = physicsWorld.CollisionWorld.ScheduleVoxelBrickOverlaps(
+                    queryBatches, queryBricksByBatch, out rawOverlaps, inputDeps);
+                queryHandle.Complete();
+            }
 
-            Profiler.BeginSample("Brick Overlap Graph Build");
-            brickOverlapGraphBuilder.serialBuildThreshold = brickOverlapSerialThreshold;
-            brickOverlapGraphBuilder.BuildAndPublish(rawOverlaps, bodyIndexToGuid);
-            rawOverlaps.Dispose();
-            Profiler.EndSample();
+            using (s_BrickOverlapGraphBuildMarker.Auto())
+            {
+                brickOverlapGraphBuilder.serialBuildThreshold = brickOverlapSerialThreshold;
+                brickOverlapGraphBuilder.BuildAndPublish(rawOverlaps, bodyIndexToGuid);
+                rawOverlaps.Dispose();
+            }
 
             return brickOverlapGraphBuilder.Graph;
         }
@@ -189,130 +212,147 @@ namespace Caelix.Simulation
                 bodyIndexToGuid.Dispose();
             }
 
-            Profiler.BeginSample("Physics Build World");
-            var buildHandle = CaelixPhysicsInterface.SchedulePhysicsWorldBuild(
-                ref tickBuf, ref physicsWorld, out bodyIndexToGuid,
-                linearAirFriction, angularAirFriction, default,
-                enableDirectSolver);
-            buildHandle.Complete();
-            haveStaticBodiesChanged.Value = 1;
-            Profiler.EndSample();
+            using (s_PhysicsBuildWorldMarker.Auto())
+            {
+                var buildHandle = CaelixPhysicsInterface.SchedulePhysicsWorldBuild(
+                    ref tickBuf, ref physicsWorld, out bodyIndexToGuid,
+                    linearAirFriction, angularAirFriction, default,
+                    enableDirectSolver);
+                buildHandle.Complete();
+                haveStaticBodiesChanged.Value = 1;
+            }
 
             // Brick-overlap queries are not part of the step. The caller issues them against the
             // stepped, synchronized collision world through BuildBrickOverlapGraph.
 
-            Profiler.BeginSample("Physics BeforeSimulationStart");
-            BeforeSimulationStart();
-            Profiler.EndSample();
+            using (s_PhysicsBeforeSimulationStartMarker.Auto())
+            {
+                BeforeSimulationStart();
+            }
 
             // Create solver stabilization settings
-            Profiler.BeginSample("Physics Build Step Input");
-            Solver.StabilizationHeuristicSettings stabilizationSettings = enableSolverStabilization
-                ? new Solver.StabilizationHeuristicSettings
+            SimulationStepInput stepInput;
+            using (s_PhysicsBuildStepInputMarker.Auto())
+            {
+                Solver.StabilizationHeuristicSettings stabilizationSettings = enableSolverStabilization
+                    ? new Solver.StabilizationHeuristicSettings
+                    {
+                        EnableSolverStabilization = true,
+                        VelocityClippingFactor = velocityClippingFactor,
+                        InertiaScalingFactor = inertiaScalingFactor
+                    }
+                    : Solver.StabilizationHeuristicSettings.Default;
+
+                // A zero-initialised DirectSolverSettings means zero contact stiffness and damping, which
+                // makes direct-solver contacts collapse. That is what a component serialized before this
+                // field existed deserialises to, so treat it as "unset" and use Unity's defaults.
+                Solver.DirectSolverSettings directSettings = directSolverSettings.ContactStiffness > 0f
+                    ? directSolverSettings
+                    : Solver.DirectSolverSettings.Default;
+
+                stepInput = new SimulationStepInput()
                 {
-                    EnableSolverStabilization = true,
-                    VelocityClippingFactor = velocityClippingFactor,
-                    InertiaScalingFactor = inertiaScalingFactor
+                    World = physicsWorld,
+                    TimeStep = dt,
+                    Gravity = gravity,
+                    SynchronizeCollisionWorld = synchronizeCollisionWorld,
+                    NumSubsteps = substepCount,
+                    NumSolverIterations = solverIterationCount,
+                    MaxDynamicDepenetrationVelocity = maxDynamicDepenetrationVelocity,
+                    MaxStaticDepenetrationVelocity = maxStaticDepenetrationVelocity,
+                    SolverStabilizationHeuristicSettings = stabilizationSettings,
+                    DirectSolverSettings = directSettings,
+                    HaveStaticBodiesChanged = haveStaticBodiesChanged
+                };
+
+                if (synchronizeCollisionWorld == false)
+                {
+                    Debug.LogWarning("Synchronize Collision World is disabled, brick overlap may stale");
                 }
-                : Solver.StabilizationHeuristicSettings.Default;
-
-            // A zero-initialised DirectSolverSettings means zero contact stiffness and damping, which
-            // makes direct-solver contacts collapse. That is what a component serialized before this
-            // field existed deserialises to, so treat it as "unset" and use Unity's defaults.
-            Solver.DirectSolverSettings directSettings = directSolverSettings.ContactStiffness > 0f
-                ? directSolverSettings
-                : Solver.DirectSolverSettings.Default;
-
-            SimulationStepInput stepInput = new SimulationStepInput()
-            {
-                World = physicsWorld,
-                TimeStep = dt,
-                Gravity = gravity,
-                SynchronizeCollisionWorld = synchronizeCollisionWorld,
-                NumSubsteps = substepCount,
-                NumSolverIterations = solverIterationCount,
-                MaxDynamicDepenetrationVelocity = maxDynamicDepenetrationVelocity,
-                MaxStaticDepenetrationVelocity = maxStaticDepenetrationVelocity,
-                SolverStabilizationHeuristicSettings = stabilizationSettings,
-                DirectSolverSettings = directSettings,
-                HaveStaticBodiesChanged = haveStaticBodiesChanged
-            };
-
-            if (synchronizeCollisionWorld == false)
-            {
-                Debug.LogWarning("Synchronize Collision World is disabled, brick overlap may stale");
             }
-            Profiler.EndSample();
 
-            Profiler.BeginSample("Physics Debug Pre-Step");
-            debugFrameCount++;
-
-            // Debug: Check collision world before simulation (first 10 frames only)
-            if (verboseLogging && debugFrameCount <= 10)
+            using (s_PhysicsDebugPreStepMarker.Auto())
             {
-                UnityEngine.Debug.Log($"[SimStep {debugFrameCount}] CollisionWorld NumBodies: {physicsWorld.CollisionWorld.NumBodies}, NumDynamic: {physicsWorld.CollisionWorld.NumDynamicBodies}, NumStatic: {physicsWorld.CollisionWorld.NumStaticBodies}");
+                debugFrameCount++;
+
+                // Debug: Check collision world before simulation (first 10 frames only)
+                if (verboseLogging && debugFrameCount <= 10)
+                {
+                    UnityEngine.Debug.Log($"[SimStep {debugFrameCount}] CollisionWorld NumBodies: {physicsWorld.CollisionWorld.NumBodies}, NumDynamic: {physicsWorld.CollisionWorld.NumDynamicBodies}, NumStatic: {physicsWorld.CollisionWorld.NumStaticBodies}");
+                }
             }
-            Profiler.EndSample();
 
             // Build the broadphase BVH trees before simulation
-            Profiler.BeginSample("Physics Build Broadphase");
-            var buildBroadphaseHandle = physicsWorld.CollisionWorld.ScheduleBuildBroadphaseJobs(
-                ref physicsWorld, dt, gravity, haveStaticBodiesChanged, default, multiThreaded);
-            Profiler.BeginSample("Physics Complete Broadphase");
-            buildBroadphaseHandle.Complete();
-            Profiler.EndSample();
-            Profiler.EndSample();
-
-            Profiler.BeginSample("Physics Debug Post-Broadphase");
-            if (verboseLogging && debugFrameCount <= 10)
+            using (s_PhysicsBuildBroadphaseMarker.Auto())
             {
-                UnityEngine.Debug.Log($"[SimStep {debugFrameCount}] Broadphase built successfully");
+                var buildBroadphaseHandle = physicsWorld.CollisionWorld.ScheduleBuildBroadphaseJobs(
+                    ref physicsWorld, dt, gravity, haveStaticBodiesChanged, default, multiThreaded);
+                using (s_PhysicsCompleteBroadphaseMarker.Auto())
+                {
+                    buildBroadphaseHandle.Complete();
+                }
             }
-            Profiler.EndSample();
 
-            Profiler.BeginSample("Physics Reset Simulation Context");
-            simulation.ResetSimulationContext(stepInput);
-            Profiler.EndSample();
+            using (s_PhysicsDebugPostBroadphaseMarker.Auto())
+            {
+                if (verboseLogging && debugFrameCount <= 10)
+                {
+                    UnityEngine.Debug.Log($"[SimStep {debugFrameCount}] Broadphase built successfully");
+                }
+            }
+
+            using (s_PhysicsResetSimulationContextMarker.Auto())
+            {
+                simulation.ResetSimulationContext(stepInput);
+            }
 
             // Narrowphase funnel counters: clear before the jobs that fill them are scheduled.
             BeginVoxelContactProfiling();
 
-            Profiler.BeginSample("Physics Schedule Step Jobs");
-            var handles = simulation.ScheduleStepJobs(stepInput, default, multiThreaded);
-            Profiler.EndSample();
+            SimulationJobHandles handles;
+            using (s_PhysicsScheduleStepJobsMarker.Auto())
+            {
+                handles = simulation.ScheduleStepJobs(stepInput, default, multiThreaded);
+            }
 
-            Profiler.BeginSample("Physics Complete Step Jobs");
-            handles.FinalExecutionHandle.Complete();
-            Profiler.EndSample();
+            using (s_PhysicsCompleteStepJobsMarker.Auto())
+            {
+                handles.FinalExecutionHandle.Complete();
+            }
 
             // Read-only contact diagnostics: must run after Complete() and before the next
             // ResetSimulationContext, while this frame's voxel contact event stream is valid.
-            Profiler.BeginSample("Physics Contact Debug Logging");
-            LogVoxelContactsAfterStep(tickBuf.nDynamicBodies);
-            LogVoxelContactProfileAfterStep();
-            Profiler.EndSample();
+            using (s_PhysicsContactDebugLoggingMarker.Auto())
+            {
+                LogVoxelContactsAfterStep(tickBuf.nDynamicBodies);
+                LogVoxelContactProfileAfterStep();
+            }
 
-            Profiler.BeginSample("Physics OnSimulationFinished");
-            OnSimulationFinished();
-            Profiler.EndSample();
+            using (s_PhysicsOnSimulationFinishedMarker.Auto())
+            {
+                OnSimulationFinished();
+            }
 
-            Profiler.BeginSample("Physics Export World");
-            var exportHandle = CaelixPhysicsInterface.SchedulePhysicsWorldExport(
-                ref tickBuf, ref physicsWorld, bodyIndexToGuid, default);
-            exportHandle.Complete();
-            Profiler.EndSample();
+            using (s_PhysicsExportWorldMarker.Auto())
+            {
+                var exportHandle = CaelixPhysicsInterface.SchedulePhysicsWorldExport(
+                    ref tickBuf, ref physicsWorld, bodyIndexToGuid, default);
+                exportHandle.Complete();
+            }
 
-            Profiler.BeginSample("Physics Complete Dispose Jobs");
-            handles.FinalDisposeHandle.Complete();
-            Profiler.EndSample();
+            using (s_PhysicsCompleteDisposeJobsMarker.Auto())
+            {
+                handles.FinalDisposeHandle.Complete();
+            }
 
             // Reset the static bodies changed flag after simulation
-            Profiler.BeginSample("Physics Reset Static Changed Flag");
-            if (haveStaticBodiesChanged.Value > 0)
+            using (s_PhysicsResetStaticChangedFlagMarker.Auto())
             {
-                haveStaticBodiesChanged.Value = 0;
+                if (haveStaticBodiesChanged.Value > 0)
+                {
+                    haveStaticBodiesChanged.Value = 0;
+                }
             }
-            Profiler.EndSample();
         }
 
         public virtual void BeforeSimulationStart() { }
