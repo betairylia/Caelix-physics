@@ -10,7 +10,7 @@
     "com.unity.test-framework": "1.6.0",
     "com.unity.modules.imgui": "1.0.0",
     "com.unity.modules.jsonserialize": "1.0.0",
-    "ink.irylia.caelix.core": "0.0.1-dev.1"
+    "ink.irylia.caelix.core": "0.0.1-exp.1"
   },
   "keywords": [
     "unity",
@@ -19,7 +19,7 @@
   "name": "ink.irylia.caelix.physics",
   "unity": "6000.5",
   "unityRelease": "0a2",
-  "version": "0.0.1-dev.1",
+  "version": "0.0.1-exp.1",
   "samples": [
     {
       "displayName": "Custom Physics Authoring",
