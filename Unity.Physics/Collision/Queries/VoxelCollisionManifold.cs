@@ -5,7 +5,7 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
-using Voxelis;
+using Caelix;
 using static Unity.Physics.Math;
 
 
@@ -56,7 +56,7 @@ namespace Unity.Physics
         //   * Positions are in world space, on body B's surface.
         // Uniform body scale is assumed to be 1.
         //
-        // Design, derivations and history: VoxelisX/VOXEL_CONTACT_GENERATION.md
+        // Design, derivations and history: Caelix/VOXEL_CONTACT_GENERATION.md
         // ---------------------------------------------------------------------------------------
 
         // Cap on the speculative margin used to size the candidate window. The contact distance

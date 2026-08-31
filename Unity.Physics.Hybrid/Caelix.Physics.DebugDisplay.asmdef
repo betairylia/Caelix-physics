@@ -1,5 +1,5 @@
 {
-    "name": "voxelis.Unity.Physics.DebugDisplay",
+    "name": "Caelix.Physics.DebugDisplay",
     "rootNamespace": "",
     "references": [
         "Unity.Burst",
@@ -7,7 +7,7 @@
         "Unity.Entities",
         "Unity.Entities.Hybrid",
         "Unity.Mathematics",
-        "voxelis.Unity.Physics",
+        "Caelix.Physics.LowLevel",
         "Unity.Transforms"
     ],
     "includePlatforms": [],

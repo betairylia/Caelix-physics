@@ -4,6 +4,12 @@ uid: changelog
 
 # Changelog
 
+## [0.0.1-dev.1]
+
+- Package the Caelix physics integration with the upstream-derived low-level runtime.
+- Rename assemblies and package metadata for Caelix.
+- Keep upstream test sources available behind `CAELIX_INCLUDE_UPSTREAM_TESTS`.
+
 ## [6.5.0] - 2026-01-12
 
 ### Added

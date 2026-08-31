@@ -103,7 +103,7 @@ namespace Unity.Physics
     /// </summary>
     /// <remarks>
     /// Accumulated on the stack inside one body pair and flushed once, so the hot loops never touch
-    /// shared memory. Without VOXELIS_CONTACT_PROFILING nothing reads them and the increments are
+    /// shared memory. Without CAELIX_CONTACT_PROFILING nothing reads them and the increments are
     /// dead stores that Burst removes.
     /// </remarks>
     [StructLayout(LayoutKind.Sequential)]
@@ -145,7 +145,7 @@ namespace Unity.Physics
     /// Collects <see cref="VoxelContactCounters"/> across every narrowphase job of a tick.
     /// </summary>
     /// <remarks>
-    /// Compiled out unless VOXELIS_CONTACT_PROFILING is defined, so a normal build pays nothing:
+    /// Compiled out unless CAELIX_CONTACT_PROFILING is defined, so a normal build pays nothing:
     /// with no reader the per-root increments become dead stores. Add the define under
     /// Project Settings > Player > Scripting Define Symbols to measure, then arm it at runtime with
     /// <see cref="Enabled"/> - the define makes measurement possible, the flag chooses when.
@@ -160,7 +160,7 @@ namespace Unity.Physics
     /// </remarks>
     public static unsafe class VoxelContactProfiler
     {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
         // Burst registers a SharedStatic in a NATIVE registry keyed by type, and that registry
         // survives domain reloads - only a process restart clears it. If the payload's size ever
         // changes, every access throws until the Editor is restarted. So the payload is a fixed
@@ -193,11 +193,11 @@ namespace Unity.Physics
 #endif
 
         /// <summary>
-        /// Whether generation flushes its counters. Always false without VOXELIS_CONTACT_PROFILING.
+        /// Whether generation flushes its counters. Always false without CAELIX_CONTACT_PROFILING.
         /// </summary>
         public static bool Enabled
         {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
             get => s_Enabled.Data != 0;
             set => s_Enabled.Data = value ? 1 : 0;
 #else
@@ -211,7 +211,7 @@ namespace Unity.Physics
         {
             get
             {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
                 return s_Enabled.Data != 0;
 #else
                 return false;
@@ -222,7 +222,7 @@ namespace Unity.Physics
         /// <summary>Clears the tick accumulator. Call before scheduling a step.</summary>
         public static void Reset()
         {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
             // Main thread only, so this is where an oversized counter struct is caught: the flush
             // runs inside Burst jobs and cannot report anything.
             if (SlotsUsed > k_SlotCount)
@@ -243,7 +243,7 @@ namespace Unity.Physics
         /// <summary>Totals for the tick. Call after the step's jobs have completed.</summary>
         public static VoxelContactCounters Snapshot()
         {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
             VoxelContactCounters result = default;
             long* destination = (long*)UnsafeUtility.AddressOf(ref result);
             long* slots = SlotPtr;
@@ -264,7 +264,7 @@ namespace Unity.Physics
         /// </summary>
         internal static void Flush(in VoxelContactCounters local)
         {
-#if VOXELIS_CONTACT_PROFILING
+#if CAELIX_CONTACT_PROFILING
             if (s_Enabled.Data == 0)
             {
                 return;

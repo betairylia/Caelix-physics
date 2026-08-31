@@ -1,4 +1,12 @@
-# About Unity Physics
+# Caelix Physics
+
+Caelix Physics is the Caelix physics package and a maintained fork of Unity Physics.
+
+Caelix-owned integration code is in `Caelix.Physics`. The upstream-derived low-level code remains in `Unity.Physics`.
+
+This is an early research and development release.
+
+## About Unity Physics
 The Unity Physics package provides a stateless, high-performance constrained rigid body simulation.
 
 ## Installing Unity Physics

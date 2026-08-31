@@ -1,6 +1,6 @@
 namespace Unity.Physics.Authoring
 {
-    // VOXELISX FORK NOTE:
+    // CAELIX FORK NOTE:
     // Upstream declares this enum in Components/RigidbodyAuthoring.cs, which this fork does not
     // ship (the authoring/baking part of Unity.Physics.Hybrid is dropped - see commit 5739e6f
     // "Remove Editor and Hybrid assemblies, keep core runtime only"). DisplayCollidersSystem

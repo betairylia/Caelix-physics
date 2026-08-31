@@ -182,10 +182,10 @@ namespace Unity.DebugDisplay
         internal static float FractionalCellsTall => (float)PixelsTall / kPixelsTall;
 
 #if UNITY_EDITOR || ENABLE_UNITY_PHYSICS_RUNTIME_DEBUG_DISPLAY
-        // VOXELISX FORK: package renamed from "com.unity.physics" to "voxelis.unity.physics",
+        // CAELIX FORK: package renamed from "com.unity.physics" to "caelix.unity.physics",
         // so the hardcoded resource path has to follow or the debug materials silently load as null.
         internal static string debugDirName =
-            "Packages/voxelis.unity.physics/Unity.Physics.Hybrid/Assets/DebugDisplay/DebugDisplayResources/";
+            "Packages/ink.irylia.caelix.physics/Unity.Physics.Hybrid/Assets/DebugDisplay/DebugDisplayResources/";
         internal static string lineMaterialFileName = "LineMaterial";
         internal static string meshMaterialFileName = "MeshMaterial";
 #endif

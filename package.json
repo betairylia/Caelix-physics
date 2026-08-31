@@ -1,6 +1,6 @@
 {
-  "displayName": "Unity Physics (VoxelisX fork)",
-  "category": "VoxelisX",
+  "displayName": "Caelix Physics",
+  "category": "Caelix",
   "description": "Unity's C# stateless physics library.\n\nBuilt on top of the Unity C# ECS framework, Unity Physics is network-ready, completely customizable, and built for performance out of the box. Whether you're building the next mobile hit or a new networked multiplayer console experience, Unity Physics leverages the Burst compiler and Job system to scale across a range of hardware.",
   "dependencies": {
     "com.unity.burst": "1.8.26",
@@ -9,16 +9,17 @@
     "com.unity.entities": "6.5.0",
     "com.unity.test-framework": "1.6.0",
     "com.unity.modules.imgui": "1.0.0",
-    "com.unity.modules.jsonserialize": "1.0.0"
+    "com.unity.modules.jsonserialize": "1.0.0",
+    "ink.irylia.caelix.core": "0.0.1-dev.1"
   },
   "keywords": [
     "unity",
     "physics"
   ],
-  "name": "voxelis.unity.physics",
+  "name": "ink.irylia.caelix.physics",
   "unity": "6000.5",
   "unityRelease": "0a2",
-  "version": "6.5.0",
+  "version": "0.0.1-dev.1",
   "samples": [
     {
       "displayName": "Custom Physics Authoring",
@@ -31,9 +32,8 @@
       "description": "Example of an advanced physics-based game element that leverages Unity Physics' Direct Solver to simulate a complex mechanism involving gears interacting with a chain. \n\nNotice: This sample has a dependency on Entities Graphics for the scene to render. \n\nThe simulation combines the Direct Solver for accurate simulation of the stiff chain links and the gears with the Iterative Solver for efficient simulation of all the collisions in the scene. This sample demonstrates how both solvers combined can capture exciting emerging physical behaviors at real-time simulation rates, such as the jamming of the gears caused by the chain getting stuck between the gears' teeth.",
       "path": "Samples~/AdvancedGamePhysics-ChainAndGears",
       "dependencies": [
-        "com.unity.physics/Samples~/Common"
+        "ink.irylia.caelix.physics/Samples~/Common"
       ]
     }
-  ],
-  "_fingerprint": "b40494739ae23831d2dc5a1caeadde83a369b35b"
+  ]
 }

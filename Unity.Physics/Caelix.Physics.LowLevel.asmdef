@@ -1,5 +1,5 @@
 {
-    "name": "voxelis.Unity.Physics",
+    "name": "Caelix.Physics.LowLevel",
     "rootNamespace": "",
     "references": [
         "Unity.Burst",
@@ -14,7 +14,7 @@
         "Unity.Numerics.Linear.Solvers.Lowlevel",
         "Unity.Profiling.Core",
         "Unity.Transforms",
-        "voxelis.Core"
+        "Caelix.Core"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

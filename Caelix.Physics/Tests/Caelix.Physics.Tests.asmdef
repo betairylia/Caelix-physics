@@ -1,0 +1,37 @@
+{
+  "name": "Caelix.Physics.Tests",
+  "rootNamespace": "Caelix.Tests",
+  "references": [
+    "Caelix.Core",
+    "Caelix.Core.Tests",
+    "Caelix.Physics",
+    "Caelix.Physics.LowLevel",
+    "Unity.Burst",
+    "Unity.Collections",
+    "Unity.Entities",
+    "Unity.Mathematics",
+    "Unity.Numerics.Memory",
+    "Unity.Numerics.Random",
+    "Unity.Numerics.Linear",
+    "Unity.Numerics.Linear.Dense",
+    "Unity.Numerics.Linear.Sparse",
+    "Unity.Numerics.Linear.Solvers.Lowlevel",
+    "UnityEngine.TestRunner",
+    "UnityEditor.TestRunner"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": true,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "nunit.framework.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

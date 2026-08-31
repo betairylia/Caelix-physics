@@ -29,7 +29,8 @@
     ],
     "autoReferenced": false,
     "defineConstraints": [
-        "UNITY_INCLUDE_TESTS"
+        "UNITY_INCLUDE_TESTS",
+        "CAELIX_INCLUDE_UPSTREAM_TESTS"
     ],
     "versionDefines": [
       {
