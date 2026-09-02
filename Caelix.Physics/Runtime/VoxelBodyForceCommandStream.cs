@@ -167,6 +167,12 @@ namespace Caelix
             Write(VoxelBodyForceCommand.ForceAtPosition(bodyId, force, worldPosition, mode));
         }
 
+        /// <summary>Queues an already-built command (the network path).</summary>
+        public void Add(in VoxelBodyForceCommand command)
+        {
+            Write(command);
+        }
+
         public void ApplyTo(ref PhysicsStepInputs tickBuf, float deltaTime)
         {
             lock (syncRoot)

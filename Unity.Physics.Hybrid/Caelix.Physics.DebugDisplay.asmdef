@@ -8,7 +8,14 @@
         "Unity.Entities.Hybrid",
         "Unity.Mathematics",
         "Caelix.Physics.LowLevel",
-        "Unity.Transforms"
+        "Unity.Transforms",
+        "Caelix.Core",
+        "Unity.Numerics.Linear",
+        "Unity.Numerics.Linear.Dense",
+        "Unity.Numerics.Linear.Solvers.Lowlevel",
+        "Unity.Numerics.Linear.Sparse",
+        "Unity.Numerics.Memory",
+        "Unity.Numerics.Random"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

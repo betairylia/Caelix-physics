@@ -33,17 +33,8 @@ namespace Caelix.Simulation
     /// could not answer, i.e. actual sector lookups. <c>brick lookups</c> counts requests, most of
     /// which the cache answers for free.
     /// </remarks>
-    public partial class CaelixPhysicsWorld
+    public sealed partial class VoxelPhysicsWorld
     {
-        [Header("Contact Profiling")]
-        [Tooltip("Collect and log voxel narrowphase funnel counters. Needs the CAELIX_CONTACT_PROFILING scripting define.")]
-        public bool enableContactProfiling = false;
-
-        [Tooltip("Log every Nth step. 1 logs every step; larger values keep the console readable while the numbers settle.")]
-        public int contactProfilingLogInterval = 60;
-
-        [Tooltip("Average the counters over the interval instead of reporting only the last step.")]
-        public bool contactProfilingAverage = true;
 
         VoxelContactCounters m_ContactProfileAccumulated;
         int m_ContactProfileSteps;
@@ -54,7 +45,7 @@ namespace Caelix.Simulation
         /// </summary>
         void BeginVoxelContactProfiling()
         {
-            if (!enableContactProfiling)
+            if (!Settings.enableContactProfiling)
             {
                 return;
             }
@@ -74,7 +65,7 @@ namespace Caelix.Simulation
         /// </summary>
         void LogVoxelContactProfileAfterStep()
         {
-            if (!enableContactProfiling)
+            if (!Settings.enableContactProfiling)
             {
                 // Cleared unconditionally. An interval report zeroes m_ContactProfileSteps, so
                 // gating this on the accumulator leaves the shared flag armed whenever profiling is
@@ -95,14 +86,14 @@ namespace Caelix.Simulation
             m_ContactProfileAccumulated.Add(step);
             m_ContactProfileSteps++;
 
-            int interval = math.max(1, contactProfilingLogInterval);
+            int interval = math.max(1, Settings.contactProfilingLogInterval);
             if (m_ContactProfileSteps < interval)
             {
                 return;
             }
 
-            VoxelContactCounters report = contactProfilingAverage ? m_ContactProfileAccumulated : step;
-            int divisor = contactProfilingAverage ? m_ContactProfileSteps : 1;
+            VoxelContactCounters report = Settings.contactProfilingAverage ? m_ContactProfileAccumulated : step;
+            int divisor = Settings.contactProfilingAverage ? m_ContactProfileSteps : 1;
             Debug.Log(FormatContactProfile(report, divisor, m_ContactProfileSteps));
 
             m_ContactProfileAccumulated = default;

@@ -7,7 +7,13 @@
     "Unity.Burst",
     "Unity.Collections",
     "Unity.Entities",
-    "Unity.Mathematics"
+    "Unity.Mathematics",
+    "Unity.Numerics.Linear",
+    "Unity.Numerics.Linear.Dense",
+    "Unity.Numerics.Linear.Solvers.Lowlevel",
+    "Unity.Numerics.Linear.Sparse",
+    "Unity.Numerics.Memory",
+    "Unity.Numerics.Random"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

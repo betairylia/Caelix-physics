@@ -39,8 +39,8 @@ namespace Caelix
         /// free and deterministic.
         /// </remarks>
         private unsafe void RefreshPhysicsSlot(
-            LockableUnsafeHashMap<int3, SectorHandle> sectors,
-            LockableUnsafeHashMap<int3, SectorNeighborHandles> sectorNeighbors,
+            SharedHashMap<int3, SectorHandle> sectors,
+            SharedHashMap<int3, SectorNeighborHandles> sectorNeighbors,
             DirtyFlags dirtyMask = DirtyFlags.GeometryWithLocalNeighbor)
         {
             if (sectors.Count == 0)

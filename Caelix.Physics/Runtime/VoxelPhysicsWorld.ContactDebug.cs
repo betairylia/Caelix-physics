@@ -10,17 +10,10 @@ namespace Caelix.Simulation
     /// contact events after a step and logs them when a body launches (linear-speed spike) or
     /// when manually armed. Never touches solver/detection state - safe to leave compiled in.
     /// </summary>
-    public partial class CaelixPhysicsWorld
+    public sealed partial class VoxelPhysicsWorld
     {
-        [Header("Contact Debug Logging")]
-        [Tooltip("Master switch for voxel contact launch/instability logging.")]
-        public bool enableContactDebugLogging = false;
-
-        [Tooltip("Linear speed jump (m/s) within one step that counts as a launch and dumps the contact set.")]
-        public float contactDebugSpikeSpeedDelta = 1.0f;
-
-        [Tooltip("Force-log this many upcoming steps unconditionally (set >0 to watch a manual edit). Auto-decrements.")]
-        public int contactDebugForceFrames = 0;
+        /// <summary>Force-log this many upcoming steps unconditionally. Auto-decrements.</summary>
+        public int contactDebugForceFrames;
 
         // Extra frames logged after a spike, to watch the instability persist or recover.
         const int k_ContactDebugFollowFrames = 3;
@@ -37,7 +30,7 @@ namespace Caelix.Simulation
         /// </summary>
         public void ArmContactDebugLogging(int frames = 5)
         {
-            enableContactDebugLogging = true;
+            Settings.enableContactDebugLogging = true;
             contactDebugForceFrames = math.max(contactDebugForceFrames, frames);
         }
 
@@ -48,7 +41,7 @@ namespace Caelix.Simulation
         /// </summary>
         void LogVoxelContactsAfterStep(int nDynamic)
         {
-            if (!enableContactDebugLogging)
+            if (!Settings.enableContactDebugLogging)
             {
                 m_ContactDebugFollowRemaining = 0;
                 return;
@@ -69,7 +62,7 @@ namespace Caelix.Simulation
             for (int i = 0; i < dynamicCount; i++)
             {
                 float speed = math.length(velocities[i].LinearVelocity);
-                if (!spike && speed - m_ContactDebugPrevSpeed[i] > contactDebugSpikeSpeedDelta)
+                if (!spike && speed - m_ContactDebugPrevSpeed[i] > Settings.contactDebugSpikeSpeedDelta)
                 {
                     spike = true;
                     spikeBody = i;

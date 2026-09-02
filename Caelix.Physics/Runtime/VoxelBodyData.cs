@@ -24,9 +24,9 @@ namespace Caelix
         private bool massCacheInitialized;
 
         /// <summary>
-        /// Mirrors <see cref="VoxelBody.accuratePhysics"/>. Selects the Unity Physics solver used for
+        /// Selects the Unity Physics solver used for
         /// contacts involving this body: <see cref="SolverType.Direct"/> when true, otherwise
-        /// <see cref="SolverType.Iterative"/>. Re-asserted from the component every tick.
+        /// <see cref="SolverType.Iterative"/>. Authored on the body component and applied when the body is added.
         /// </summary>
         public bool accuratePhysics;
 
@@ -49,6 +49,31 @@ namespace Caelix
             motionVelocity = DefaultMotionVelocity();
             massProperties = default;
             _cached_body_index = -1;
+        }
+
+        /// <summary>
+        /// Creates a body record with its voxel collider. The owning world calls this when a body
+        /// is added and disposes the record when the body is removed.
+        /// </summary>
+        public static VoxelBodyData Create(Allocator allocator, bool accuratePhysics)
+        {
+            var data = new VoxelBodyData(allocator);
+            data.accuratePhysics = accuratePhysics;
+
+            var material = new Unity.Physics.Material
+            {
+                Friction = 0.1f,
+                Restitution = 0.0f,
+                FrictionCombinePolicy = Unity.Physics.Material.CombinePolicy.GeometricMean,
+                RestitutionCombinePolicy = Unity.Physics.Material.CombinePolicy.GeometricMean,
+                CollisionResponse = Unity.Physics.CollisionResponsePolicy.CollideRaiseCollisionEvents
+            };
+
+            data.collider = Unity.Physics.VoxelCollider.Create(
+                null,
+                Unity.Physics.CollisionFilter.Default,
+                material);
+            return data;
         }
 
         private static Unity.Physics.MotionData DefaultMotionData()
@@ -86,7 +111,7 @@ namespace Caelix
         }
 
         private void RefreshMassPropertiesCache(
-            LockableUnsafeHashMap<int3, SectorHandle> sectors,
+            SharedHashMap<int3, SectorHandle> sectors,
             bool isStatic,
             DirtyFlags dirtyMask = DirtyFlags.Geometry)
         {
@@ -131,7 +156,7 @@ namespace Caelix
                     inputs.Add(new VoxelEntityPhysics.SectorMassMomentInput
                     {
                         SectorPosition = kvp.Key,
-                        SectorBlockPosition = VoxelEntity.GetSectorBlockPos(kvp.Key),
+                        SectorBlockPosition = VoxelEntityData.GetSectorBlockPos(kvp.Key),
                         Sector = kvp.Value
                     });
                 }
@@ -234,7 +259,7 @@ namespace Caelix
             massCacheInitialized = true;
         }
 
-        private bool RemoveMissingSectorMoments(LockableUnsafeHashMap<int3, SectorHandle> sectors)
+        private bool RemoveMissingSectorMoments(SharedHashMap<int3, SectorHandle> sectors)
         {
             if (!sectorMassCache.IsCreated || sectorMassCache.Count == 0)
             {
