@@ -20,8 +20,8 @@ namespace Caelix.Tests
         static readonly Guid128 SourceGuid = new Guid128(1, 0, 0, 0);
         static readonly Guid128 TargetGuid = new Guid128(2, 0, 0, 0);
 
-        const BrickUpdateFlags SourceFlag = BrickUpdateFlags.Reserved1;
-        const BrickUpdateFlags MotionFlag = BrickUpdateFlags.Reserved2;
+        const BrickUpdateFlags SourceFlag = BrickUpdateFlags.Automata1;
+        const BrickUpdateFlags MotionFlag = BrickUpdateFlags.Automata2;
 
         // ---------------------------------------------------------------- query building
 

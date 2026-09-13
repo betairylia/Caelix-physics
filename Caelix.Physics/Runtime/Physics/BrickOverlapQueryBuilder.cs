@@ -38,7 +38,7 @@ namespace Caelix.Simulation
         public static BrickOverlapQuerySettings Default => new BrickOverlapQuerySettings
         {
             FlagsToPropagate = BrickUpdateFlags.All,
-            MotionDirtyMask = BrickUpdateFlags.GeneralAutomata,
+            MotionDirtyMask = BrickUpdateFlags.Automata0,
             IncludeMovingBodies = true
         };
 
