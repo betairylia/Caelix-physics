@@ -124,6 +124,9 @@ namespace Caelix.Simulation
         // Time step of the last simulated step, reused when a caller asks for a broadphase
         // rebuild before querying (motion expansion must match the step that produced the pose).
         private float lastTimeStep;
+        private bool spatialPrepared;
+        private bool collisionWorldSynchronized;
+        private NativeArray<Aabb> preparedBodyBounds;
 
         public VoxelBodyForceCommandStream BodyForceCommands => bodyForceCommands;
 
@@ -167,6 +170,17 @@ namespace Caelix.Simulation
                 return default;
             }
 
+            if (!collisionWorldSynchronized)
+            {
+                // Standalone callers may defer synchronization in the simulation settings.
+                // Alien propagation still requires the resulting poses before querying.
+                physicsWorld.CollisionWorld.ScheduleUpdateDynamicTree(
+                    ref physicsWorld, lastTimeStep, Settings.gravity, inputDeps,
+                    Settings.multiThreaded).Complete();
+                collisionWorldSynchronized = true;
+                inputDeps = default;
+            }
+
             if (rebuildBroadphase)
             {
                 using (s_BrickOverlapRebuildBroadphaseMarker.Auto())
@@ -197,16 +211,12 @@ namespace Caelix.Simulation
         }
 
         /// <summary>
-        /// Runs one physics step over the world's entities and bodies. Reads transforms and
-        /// velocities from <paramref name="tickBuf"/> and writes the stepped poses and velocities
-        /// back into it.
+        /// Prepares membership, mappings, collider storage and poses at the topology boundary.
+        /// Builds the query BVH without mass, force or motion preparation. The entity/body layout
+        /// must remain fixed until SimulateStep completes.
         /// </summary>
-        public void SimulateStep(float dt, ref PhysicsStepInputs tickBuf)
+        public void PrepareSpatialQueries(ref PhysicsStepInputs tickBuf)
         {
-            lastTimeStep = dt;
-
-            // The previous step's mapping stayed alive for that step's post-step queries.
-            // It describes the body layout that is about to be replaced, so release it here.
             if (bodyIndexToGuid.IsCreated)
             {
                 bodyIndexToGuid.Dispose();
@@ -217,10 +227,70 @@ namespace Caelix.Simulation
                 var buildHandle = CaelixPhysicsInterface.SchedulePhysicsWorldBuild(
                     ref tickBuf, ref physicsWorld, out bodyIndexToGuid,
                     Settings.linearAirFriction, Settings.angularAirFriction, default,
-                    Settings.enableDirectSolver);
+                    Settings.enableDirectSolver, spatialOnly: true);
                 buildHandle.Complete();
                 haveStaticBodiesChanged.Value = 1;
             }
+
+            if (!preparedBodyBounds.IsCreated || preparedBodyBounds.Length != physicsWorld.NumBodies)
+            {
+                if (preparedBodyBounds.IsCreated) preparedBodyBounds.Dispose();
+                preparedBodyBounds = new NativeArray<Aabb>(physicsWorld.NumBodies, Allocator.Persistent);
+            }
+            for (int i = 0; i < preparedBodyBounds.Length; i++)
+                preparedBodyBounds[i] = physicsWorld.Bodies[i].CalculateAabb();
+
+            physicsWorld.CollisionWorld.ScheduleBuildBroadphaseJobs(
+                ref physicsWorld, 0f, float3.zero, haveStaticBodiesChanged,
+                default, Settings.multiThreaded).Complete();
+            spatialPrepared = true;
+            collisionWorldSynchronized = true;
+        }
+
+        public void SimulateStep(float dt, ref PhysicsStepInputs tickBuf)
+        {
+            lastTimeStep = dt;
+            if (!spatialPrepared)
+            {
+                // No automata query ran this tick (or this is a standalone physics caller).
+                // Build once, with the already refreshed properties and forces.
+                if (bodyIndexToGuid.IsCreated) bodyIndexToGuid.Dispose();
+                using (s_PhysicsBuildWorldMarker.Auto())
+                {
+                    CaelixPhysicsInterface.SchedulePhysicsWorldBuild(
+                        ref tickBuf, ref physicsWorld, out bodyIndexToGuid,
+                        Settings.linearAirFriction, Settings.angularAirFriction, default,
+                        Settings.enableDirectSolver).Complete();
+                }
+                haveStaticBodiesChanged.Value = 1;
+            }
+            else
+            {
+                // Snapshot swaps invalidate collider storage views. Membership and indices are fixed
+                // at the topology boundary; refresh those views and prepare motion only now, after
+                // occupancy, physics slots, mass properties and forces have been updated.
+                CaelixPhysicsInterface.RefreshColliderEntities(ref tickBuf);
+                new CaelixPhysicsInterface.FillPhysicsWorldJob
+                {
+                    tickBuf = tickBuf,
+                    rigidBodies = physicsWorld.Bodies,
+                    motionDatas = physicsWorld.MotionDatas,
+                    motionVelocities = physicsWorld.MotionVelocities,
+                    bodyIndexToGuid = bodyIndexToGuid,
+                    linearDamping = Settings.linearAirFriction,
+                    angularDamping = Settings.angularAirFriction
+                }.Schedule().Complete();
+
+                haveStaticBodiesChanged.Value = 0;
+                for (int i = physicsWorld.NumDynamicBodies; i < physicsWorld.NumBodies; i++)
+                {
+                    Aabb now = physicsWorld.Bodies[i].CalculateAabb();
+                    Aabb before = preparedBodyBounds[i];
+                    if (math.any(now.Min != before.Min) || math.any(now.Max != before.Max))
+                        haveStaticBodiesChanged.Value = 1;
+                }
+            }
+            spatialPrepared = false;
 
             SimulationStepInput stepInput;
             using (s_PhysicsBuildStepInputMarker.Auto())
@@ -256,10 +326,6 @@ namespace Caelix.Simulation
                     HaveStaticBodiesChanged = haveStaticBodiesChanged
                 };
 
-                if (Settings.synchronizeCollisionWorld == false)
-                {
-                    Debug.LogWarning("Synchronize Collision World is disabled, brick overlap may stale");
-                }
             }
 
             debugFrameCount++;
@@ -297,6 +363,7 @@ namespace Caelix.Simulation
             {
                 handles.FinalExecutionHandle.Complete();
             }
+            collisionWorldSynchronized = Settings.synchronizeCollisionWorld;
 
             // Read-only contact diagnostics: must run after Complete() and before the next
             // ResetSimulationContext, while this frame's voxel contact event stream is valid.
@@ -332,6 +399,8 @@ namespace Caelix.Simulation
             simulation.Dispose();
             physicsWorld.Dispose();
             haveStaticBodiesChanged.Dispose();
+            if (preparedBodyBounds.IsCreated) preparedBodyBounds.Dispose();
+            if (alienEntityRanks.IsCreated) alienEntityRanks.Dispose();
             if (bodyIndexToGuid.IsCreated)
             {
                 bodyIndexToGuid.Dispose();

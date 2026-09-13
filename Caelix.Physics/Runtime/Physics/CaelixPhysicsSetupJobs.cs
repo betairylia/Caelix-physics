@@ -34,6 +34,7 @@ namespace Caelix.Simulation
             // Overrides each body's persisted MotionData damping so the value is a single live-tunable knob.
             public float linearDamping;
             public float angularDamping;
+            public bool spatialOnly;
 
             public void Execute()
             {
@@ -66,6 +67,18 @@ namespace Caelix.Simulation
 
                     if (!entity.isStatic)
                     {
+                        if (spatialOnly)
+                        {
+                            // The query BVH needs poses, not mass or force integration. Build it
+                            // with zero motion expansion; simulation prepares real motion later.
+                            motionDatas[bodyIndex] = new Unity.Physics.MotionData
+                            {
+                                WorldFromMotion = entity.transform,
+                                BodyFromMotion = RigidTransform.identity
+                            };
+                            motionVelocities[bodyIndex] = default;
+                            continue;
+                        }
                         var massProps = body.massProperties;
 
                         RigidTransform bodyFromMotion = new RigidTransform(
@@ -176,7 +189,8 @@ namespace Caelix.Simulation
             float linearDamping,
             float angularDamping,
             JobHandle inputDeps,
-            bool enableDirectSolver = false)
+            bool enableDirectSolver = false,
+            bool spatialOnly = false)
         {
             int nDynamic = tickBuf.nDynamicBodies;
             int nStatic = tickBuf.VoxelBodies.Count - nDynamic;
@@ -201,7 +215,8 @@ namespace Caelix.Simulation
                 motionVelocities = world.MotionVelocities,
                 bodyIndexToGuid = bodyIndexToGuid,
                 linearDamping = linearDamping,
-                angularDamping = angularDamping
+                angularDamping = angularDamping,
+                spatialOnly = spatialOnly
             };
 
             return fillWorldJob.Schedule(inputDeps);
