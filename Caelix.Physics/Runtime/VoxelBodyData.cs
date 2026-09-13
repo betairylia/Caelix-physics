@@ -114,7 +114,7 @@ namespace Caelix
         private void RefreshMassPropertiesCache(
             in VoxelEntityData entity,
             bool isStatic,
-            DirtyFlags dirtyMask = DirtyFlags.Geometry)
+            BrickUpdateFlags dirtyMask = BrickUpdateFlags.Geometry)
         {
             if (isStatic)
             {

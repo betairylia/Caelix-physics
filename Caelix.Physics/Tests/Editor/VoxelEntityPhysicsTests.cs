@@ -160,7 +160,7 @@ namespace Caelix.Tests
             // Physics-slot generation is gated on the require-update (read) buffer that dirty
             // propagation would normally populate; mark it directly since no propagation runs here.
             // MarkRequired skips unallocated bricks, so it must follow the writes above.
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);
@@ -228,7 +228,7 @@ namespace Caelix.Tests
         {
             using var scope = new EntityDataTestScope();
             scope.Data.SetBlock(new int3(1, 1, 1), new Block(1));
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);
@@ -254,7 +254,7 @@ namespace Caelix.Tests
             using var scope = new EntityDataTestScope();
             scope.Data.SetBlock(new int3(1, 1, 1), new Block(1));
             scope.Data.SetBlock(new int3(2, 1, 1), new Block(1));
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);
@@ -287,7 +287,7 @@ namespace Caelix.Tests
             scope.Data.SetBlock(new int3(1, 1, 1), new Block(1));
             scope.Data.SetBlock(new int3(2, 1, 1), new Block(1));
             scope.Data.SetBlock(new int3(1, 2, 1), new Block(1));
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);
@@ -345,7 +345,7 @@ namespace Caelix.Tests
             scope.Data.SetBlock(new int3(5, 4, 0), new Block(1));
             scope.Data.SetBlock(new int3(7, 0, 7), new Block(1));
 
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);
@@ -415,7 +415,7 @@ namespace Caelix.Tests
                 }
             }
 
-            scope.Data.MarkRequired(int3.zero, DirtyFlags.GeometryWithLocalNeighbor);
+            scope.Data.MarkRequired(int3.zero, BrickUpdateFlags.GeometryWithLocalNeighbor);
             scope.Data.RefreshNonEmptyMask();
 
             var bodyData = new VoxelBodyData(Allocator.Persistent);

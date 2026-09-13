@@ -42,7 +42,7 @@ namespace Caelix
         /// </remarks>
         private unsafe void RefreshPhysicsSlot(
             in VoxelEntityData entity,
-            DirtyFlags dirtyMask = DirtyFlags.GeometryWithLocalNeighbor)
+            BrickUpdateFlags dirtyMask = BrickUpdateFlags.GeometryWithLocalNeighbor)
         {
             if (entity.RegionCount == 0)
             {

@@ -131,7 +131,7 @@ namespace Caelix.Simulation
                 }
 
                 // MarkRequired marks an EXISTING brick only, and reports whether it did.
-                return entity.MarkRequired(key.BrickCoord, (DirtyFlags)flags);
+                return entity.MarkRequired(key.BrickCoord, (BrickUpdateFlags)flags);
             }
         }
     }

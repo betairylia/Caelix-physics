@@ -48,10 +48,10 @@ namespace Caelix.Tests
                 // MarkRequired only marks bricks that exist, so this runs after every Set.
                 foreach (int3 key in Scope.Data.EnumerateBricks())
                 {
-                    Scope.Data.MarkRequired(key, DirtyFlags.GeometryWithLocalNeighbor);
+                    Scope.Data.MarkRequired(key, BrickUpdateFlags.GeometryWithLocalNeighbor);
                 }
 
-                Scope.Data.RefreshNonEmptyMask(DirtyFlags.GeometryWithLocalNeighbor);
+                Scope.Data.RefreshNonEmptyMask(BrickUpdateFlags.GeometryWithLocalNeighbor);
 
                 var bodyData = new VoxelBodyData(Allocator.Persistent);
                 try

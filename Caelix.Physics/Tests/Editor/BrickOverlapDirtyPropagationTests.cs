@@ -20,8 +20,8 @@ namespace Caelix.Tests
         static readonly Guid128 SourceGuid = new Guid128(1, 0, 0, 0);
         static readonly Guid128 TargetGuid = new Guid128(2, 0, 0, 0);
 
-        const DirtyFlags SourceFlag = DirtyFlags.Reserved1;
-        const DirtyFlags MotionFlag = DirtyFlags.Reserved2;
+        const BrickUpdateFlags SourceFlag = BrickUpdateFlags.Reserved1;
+        const BrickUpdateFlags MotionFlag = BrickUpdateFlags.Reserved2;
 
         // ---------------------------------------------------------------- query building
 
@@ -131,7 +131,7 @@ namespace Caelix.Tests
         // ---------------------------------------------------------------- propagation
 
         [Test]
-        public void PropagationMarksTheAlienBrickWithTheSourceFlags()
+        public void PropagationMarksTheAlienBrickWithTheDirtyFlags()
         {
             using var scope = new PropagationScope();
             AddAllocatedBrick(scope.Source, int3.zero, int3.zero);
@@ -168,7 +168,7 @@ namespace Caelix.Tests
             // Nothing on the target is a SOURCE of dirtiness any more: an enumeration restricted to
             // dirty bricks yields nothing at all.
             int dirtyBricks = 0;
-            foreach (BrickSourceFlags b in scope.Target.Data.EnumerateBrickSourceFlags(DirtyFlags.All, true))
+            foreach (BrickDirtyFlags b in scope.Target.Data.EnumerateBrickDirtyFlags(BrickUpdateFlags.All, true))
             {
                 dirtyBricks++;
             }
@@ -235,7 +235,7 @@ namespace Caelix.Tests
         {
             return new BrickOverlapQuerySettings
             {
-                FlagsToPropagate = DirtyFlags.All,
+                FlagsToPropagate = BrickUpdateFlags.All,
                 MotionDirtyMask = MotionFlag,
                 IncludeMovingBodies = true
             };
@@ -254,7 +254,7 @@ namespace Caelix.Tests
         }
 
         static void MarkBrickDirty(
-            EntityDataTestScope entity, int3 regionPos, int3 brickInRegion, DirtyFlags flags)
+            EntityDataTestScope entity, int3 regionPos, int3 brickInRegion, BrickUpdateFlags flags)
         {
             entity.Data.MarkBrickDirty(VoxelRegion.FirstKeyOf(regionPos) + brickInRegion, flags);
         }
@@ -336,7 +336,7 @@ namespace Caelix.Tests
             NativeHashMap<Guid128, VoxelEntityData> m_Entities;
 
             public BrickOverlapPropagationStats Propagate(
-                (int3 Brick, DirtyFlags Flags) source, int3 targetBrick)
+                (int3 Brick, BrickUpdateFlags Flags) source, int3 targetBrick)
             {
                 if (m_Entities.IsCreated) m_Entities.Dispose();
                 m_Entities = new NativeHashMap<Guid128, VoxelEntityData>(2, Allocator.Persistent);

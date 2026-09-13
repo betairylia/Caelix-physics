@@ -24,10 +24,10 @@ namespace Caelix.Simulation
     public struct BrickOverlapQuerySettings
     {
         /// <summary> Dirty bits a dirty source brick may hand to its alien neighbors. </summary>
-        public DirtyFlags FlagsToPropagate;
+        public BrickUpdateFlags FlagsToPropagate;
 
         /// <summary> Flags a moving entity's bricks carry, independent of their dirty state. </summary>
-        public DirtyFlags MotionDirtyMask;
+        public BrickUpdateFlags MotionDirtyMask;
 
         /// <summary>
         /// When set, every allocated brick of a non-static entity is a source. When clear,
@@ -37,8 +37,8 @@ namespace Caelix.Simulation
 
         public static BrickOverlapQuerySettings Default => new BrickOverlapQuerySettings
         {
-            FlagsToPropagate = DirtyFlags.All,
-            MotionDirtyMask = DirtyFlags.GeneralAutomata,
+            FlagsToPropagate = BrickUpdateFlags.All,
+            MotionDirtyMask = BrickUpdateFlags.GeneralAutomata,
             IncludeMovingBodies = true
         };
 
@@ -47,9 +47,9 @@ namespace Caelix.Simulation
         {
             return new BrickOverlapQuerySettings
             {
-                FlagsToPropagate = (DirtyFlags)DirtyPropagationSettings.FilterCanPropagateToAlien(
+                FlagsToPropagate = (BrickUpdateFlags)DirtyPropagationSettings.FilterCanPropagateToAlien(
                     (ushort)FlagsToPropagate),
-                MotionDirtyMask = (DirtyFlags)DirtyPropagationSettings.FilterCanPropagateToAlien(
+                MotionDirtyMask = (BrickUpdateFlags)DirtyPropagationSettings.FilterCanPropagateToAlien(
                     (ushort)MotionDirtyMask),
                 IncludeMovingBodies = IncludeMovingBodies
             };
@@ -112,8 +112,8 @@ namespace Caelix.Simulation
             Allocator allocator = Allocator.TempJob)
         {
             settings = settings.Normalized();
-            if (settings.FlagsToPropagate == DirtyFlags.None &&
-                (!settings.IncludeMovingBodies || settings.MotionDirtyMask == DirtyFlags.None))
+            if (settings.FlagsToPropagate == BrickUpdateFlags.None &&
+                (!settings.IncludeMovingBodies || settings.MotionDirtyMask == BrickUpdateFlags.None))
             {
                 return default;
             }
@@ -216,7 +216,7 @@ namespace Caelix.Simulation
             }
 
             /// <remarks>
-            /// This is the bridge-phase reader of SOURCE dirty flags, and the only one in physics:
+            /// This is the bridge-phase reader of the dirty flags, and the only one in physics:
             /// it runs inside the tick, after propagation and before the end-of-tick clear. Every
             /// other physics consumer reads require-update flags instead.
             /// </remarks>
@@ -235,7 +235,7 @@ namespace Caelix.Simulation
                 bool dirtyOnly = motionFlags == 0;
                 int written = 0;
 
-                foreach (BrickSourceFlags b in entity.EnumerateBrickSourceFlags((DirtyFlags)DirtyMask, dirtyOnly))
+                foreach (BrickDirtyFlags b in entity.EnumerateBrickDirtyFlags((BrickUpdateFlags)DirtyMask, dirtyOnly))
                 {
                     ushort flags = (ushort)(motionFlags | (ushort)b.Flags);
                     if (flags == 0)
