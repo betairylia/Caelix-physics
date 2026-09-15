@@ -62,7 +62,7 @@ namespace Caelix
 
             var material = new Unity.Physics.Material
             {
-                Friction = 0.1f,
+                Friction = 0.04f,
                 Restitution = 0.0f,
                 FrictionCombinePolicy = Unity.Physics.Material.CombinePolicy.GeometricMean,
                 RestitutionCombinePolicy = Unity.Physics.Material.CombinePolicy.GeometricMean,
